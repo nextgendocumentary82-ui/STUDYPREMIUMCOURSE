@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+
+  <meta name="theme-color" content="#08080a">
+
+  <meta name="description" content="STUDY PREMIUM COURSE App Details">
+
+  <title>App • STUDY PREMIUM COURSE </title>
+
+  <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body>
+
+  <!-- ================= HEADER ================= -->
+
+  <header class="detail-header">
+
+    <button class="back" onclick="history.back()" aria-label="Go back">
+      ‹
+    </button>
+
+    <b>App Store</b>
+
+    <div class="head-actions"><button class="icon-btn" onclick="location.href='/account.html'" title="My Batches">📚</button>
+
+      <button class="icon-btn" onclick="shareCurrentApp()" title="Share">
+        ↗
+      </button>
+
+    </div>
+
+  </header>
+
+
+  <!-- ================= APP DETAILS ================= -->
+
+  <main id="detail" class="detail">
+
+    <div class="loading">
+      Loading app...
+    </div>
+
+  </main>
+
+
+  <!-- ================= PAYMENT MODAL ================= -->
+
+  <div id="payModal" class="modal hidden">
+
+    <div class="modal-card">
+
+      <button class="close" onclick="closePay()" aria-label="Close">
+        ×
+      </button>
+
+
+      <h2>
+        Complete Payment
+      </h2>
+
+
+      <p id="payText">
+        Complete payment to continue.
+      </p>
+
+
+      <!-- CUSTOMER DETAILS -->
+
+      <input id="buyerName" type="text" placeholder="Your name" autocomplete="name">
+
+
+      <input id="buyerEmail" type="email" placeholder="Email" autocomplete="email">
+
+
+      <input id="buyerPhone" type="tel" placeholder="Mobile number" autocomplete="tel" maxlength="15">
+
+
+      <button id="payButton" class="primary" onclick="startPayment()">
+        Pay & Continue
+      </button>
+
+
+      <small>
+        Secure payment powered by Razorpay.
+        Access is unlocked only after server-side
+        payment verification.
+      </small>
+
+    </div>
+
+  </div>
+
+
+  <!-- ================= RAZORPAY ================= -->
+
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+
+  <!-- ================= APP SCRIPT ================= -->
+
+  <script src="/app.js"></script>
+
+
+  <!-- ================= SHARE ================= -->
+
+  <script>
+
+    async function shareCurrentApp() {
+
+      try {
+
+        const url = window.location.href;
+
+        if (navigator.share) {
+
+          await navigator.share({
+            title: document.title,
+            text: "Check this app on STUDY PREMIUM COURSE",
+            url: url
+          });
+
+        } else {
+
+          await navigator.clipboard.writeText(url);
+
+          if (typeof toast === "function") {
+            toast("App link copied.");
+          } else {
+            alert("App link copied.");
+          }
+
+        }
+
+      } catch (error) {
+
+        console.log("Share cancelled.");
+
+      }
+
+    }
+
+  </script>
+
+</body>
+
+</html>

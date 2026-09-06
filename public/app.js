@@ -1109,7 +1109,7 @@ async function loadDonationLeaderboard() {
     if (!rows.length) { el.innerHTML = `<div class="loading">No donations yet. Be the first supporter!</div>`; return; }
     el.innerHTML = rows.map(x => `
       <div class="leader-row ${x.rank <= 3 ? "leader-top" : ""}">
-        <div class="leader-rank">${x.rank <= 3 ? ["🥇","🥈","🥉"][x.rank-1] : "#" + x.rank}</div>
+        <div class="leader-rank">${x.rank <= 3 ? ["🥇", "🥈", "🥉"][x.rank - 1] : "#" + x.rank}</div>
         <div class="leader-name">${esc(x.name)}</div>
         <strong>₹${Number(x.amount || 0).toLocaleString("en-IN")}</strong>
       </div>`).join("");
@@ -1150,6 +1150,81 @@ async function startDonationPayment() {
     new Razorpay(options).open();
   } catch (e) { toast(e.message); }
 }
+
+
+/* =========================================================
+   LIVE VISITOR TRACKING
+========================================================= */
+(function initVisitorAnalytics() {
+  const KEY = "spc_visitor_session_id";
+  const HEARTBEAT_MS = 15000;
+
+  function getSessionId() {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : "v_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  }
+
+  const sessionId = getSessionId();
+
+  async function sendVisit() {
+    try {
+      await fetch("/api/analytics/visit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          page: location.pathname + location.search
+        }),
+        keepalive: true
+      });
+    } catch { }
+  }
+
+  function updateCounter(data) {
+    const live = document.getElementById("liveUserCount");
+    const total = document.getElementById("totalVisitorCount");
+    if (live && Number.isFinite(Number(data.liveUsers))) {
+      live.textContent = Number(data.liveUsers).toLocaleString("en-IN");
+    }
+    if (total && Number.isFinite(Number(data.totalVisitors))) {
+      total.textContent = Number(data.totalVisitors).toLocaleString("en-IN");
+    }
+  }
+
+  async function refreshCounter() {
+    try {
+      const r = await fetch("/api/analytics/public");
+      if (r.ok) updateCounter(await r.json());
+    } catch { }
+  }
+
+  async function heartbeat() {
+    await sendVisit();
+    await refreshCounter();
+  }
+
+  heartbeat();
+  setInterval(heartbeat, HEARTBEAT_MS);
+
+  window.addEventListener("pagehide", () => {
+    try {
+      const body = JSON.stringify({
+        sessionId,
+        page: location.pathname + location.search
+      });
+      navigator.sendBeacon(
+        "/api/analytics/visit",
+        new Blob([body], { type: "application/json" })
+      );
+    } catch { }
+  });
+})();
 
 /* =========================================================
    STARTUP

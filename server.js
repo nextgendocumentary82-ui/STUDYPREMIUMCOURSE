@@ -19,7 +19,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const multer = require("multer");
 let nodemailer = null;
-try { nodemailer = require("nodemailer"); } catch {}
+try { nodemailer = require("nodemailer"); } catch { }
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -1199,6 +1199,46 @@ const Settings =
     settingsSchema
   );
 
+
+// ============================================================
+// VISITOR ANALYTICS / LIVE USERS
+// ============================================================
+
+const visitorSessionSchema = new mongoose.Schema({
+  sessionId: { type: String, unique: true, index: true },
+  firstSeen: { type: Date, default: Date.now, index: true },
+  lastSeen: { type: Date, default: Date.now, index: true },
+  page: { type: String, default: "/" },
+  userAgent: { type: String, default: "" }
+}, { timestamps: true });
+
+const VisitorSession = mongoose.model("VisitorSession", visitorSessionSchema);
+
+const VISITOR_LIVE_WINDOW_MS = 45 * 1000;
+
+async function touchVisitor(sessionId, page = "/") {
+  if (!sessionId || typeof sessionId !== "string" || sessionId.length < 10 || sessionId.length > 120) {
+    return null;
+  }
+
+  const safePage = String(page || "/").slice(0, 300);
+
+  return VisitorSession.findOneAndUpdate(
+    { sessionId },
+    {
+      $set: {
+        lastSeen: new Date(),
+        page: safePage,
+        userAgent: ""
+      },
+      $setOnInsert: {
+        firstSeen: new Date()
+      }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+}
+
 // ============================================================
 // RAZORPAY
 // ============================================================
@@ -1513,6 +1553,85 @@ function requireAdmin(
     });
   }
 }
+
+
+// ============================================================
+// VISITOR ANALYTICS API
+// ============================================================
+
+// Create/update a visitor session. The browser sends this on first load
+// and then periodically as a heartbeat.
+app.post("/api/analytics/visit", async (req, res) => {
+  try {
+    const sessionId = String(req.body.sessionId || "").trim();
+    const page = String(req.body.page || "/").slice(0, 300);
+
+    if (!sessionId || sessionId.length < 10 || sessionId.length > 120) {
+      return res.status(400).json({ error: "Invalid visitor session." });
+    }
+
+    await VisitorSession.findOneAndUpdate(
+      { sessionId },
+      {
+        $set: {
+          lastSeen: new Date(),
+          page,
+          userAgent: String(req.headers["user-agent"] || "").slice(0, 500)
+        },
+        $setOnInsert: {
+          firstSeen: new Date()
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("VISITOR TRACKING ERROR:", error);
+    res.status(500).json({ error: "Visitor tracking failed." });
+  }
+});
+
+// Admin-only live visitor analytics.
+app.get("/api/admin/analytics/visitors", requireAdmin, async (req, res) => {
+  try {
+    const now = Date.now();
+    const liveSince = new Date(now - VISITOR_LIVE_WINDOW_MS);
+
+    const [totalVisitors, liveUsers, todayVisitors, recentVisitors] = await Promise.all([
+      VisitorSession.countDocuments({}),
+      VisitorSession.countDocuments({ lastSeen: { $gte: liveSince } }),
+      VisitorSession.countDocuments({
+        firstSeen: {
+          $gte: new Date(new Date().setHours(0, 0, 0, 0))
+        }
+      }),
+      VisitorSession.find({})
+        .sort({ lastSeen: -1 })
+        .limit(30)
+        .select("sessionId firstSeen lastSeen page")
+        .lean()
+    ]);
+
+    res.json({
+      success: true,
+      liveUsers,
+      totalVisitors,
+      todayVisitors,
+      liveWindowSeconds: VISITOR_LIVE_WINDOW_MS / 1000,
+      visitors: recentVisitors.map(v => ({
+        sessionId: v.sessionId,
+        firstSeen: v.firstSeen,
+        lastSeen: v.lastSeen,
+        page: v.page,
+        live: new Date(v.lastSeen).getTime() >= now - VISITOR_LIVE_WINDOW_MS
+      }))
+    });
+  } catch (error) {
+    console.error("VISITOR ANALYTICS ERROR:", error);
+    res.status(500).json({ error: "Unable to load visitor analytics." });
+  }
+});
 
 // ============================================================
 // ACCESS AUTH
@@ -1830,7 +1949,7 @@ app.post("/api/donations/payment/verify", async (req, res) => {
       .digest("hex");
 
     if (expected.length !== String(razorpay_signature).length ||
-        !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(razorpay_signature)))) {
+      !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(razorpay_signature)))) {
       return res.status(400).json({ error: "Payment signature verification failed." });
     }
 

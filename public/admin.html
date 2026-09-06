@@ -10,7 +10,7 @@
 
   <meta name="robots" content="noindex,nofollow">
 
-  <title>STUDY PREMIUM COURSE  Admin</title>
+  <title>STUDY PREMIUM COURSE Admin</title>
 
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -74,7 +74,7 @@
       <div>
 
         <b>
-          STUDY PREMIUM COURSE 
+          STUDY PREMIUM COURSE
         </b>
 
         <span>
@@ -117,6 +117,39 @@
         <b>₹0</b>
       </div>
 
+    </section>
+
+    <!-- ===================================================
+         LIVE VISITOR ANALYTICS
+    ==================================================== -->
+
+    <section class="panel visitor-analytics-panel">
+      <div class="panel-head-row">
+        <div>
+          <h2>Live Website Analytics</h2>
+          <p class="muted">Live users update automatically every 5 seconds.</p>
+        </div>
+        <button type="button" onclick="loadVisitorAnalytics()">Refresh</button>
+      </div>
+
+      <div class="stats visitor-stats">
+        <div class="stat">
+          <small>🟢 Live Users</small>
+          <b id="analyticsLiveUsers">0</b>
+        </div>
+        <div class="stat">
+          <small>👥 Total Visitors</small>
+          <b id="analyticsTotalVisitors">0</b>
+        </div>
+        <div class="stat">
+          <small>📅 Today</small>
+          <b id="analyticsTodayVisitors">0</b>
+        </div>
+      </div>
+
+      <div id="visitorActivity" class="visitor-activity">
+        <div class="loading">Loading visitor activity...</div>
+      </div>
     </section>
 
 
@@ -265,7 +298,8 @@
 
         <!-- ACTIONS -->
 
-        <p class="upload-note">Uploaded files are stored in Backblaze B2. APK download is unlocked only after verified payment for paid apps.</p>
+        <p class="upload-note">Uploaded files are stored in Backblaze B2. APK download is unlocked only after verified
+          payment for paid apps.</p>
 
         <div class="form-actions">
 
@@ -365,8 +399,11 @@
 
     <div class="panel">
       <h2>🎁 Batch Donation Requests</h2>
-      <p style="color:#777;font-size:13px;line-height:1.6">Verify recipient OTP first. Approved requests transfer the selected owned batch from donor to recipient automatically.</p>
-      <div id="donations"><p class="loading">Loading donation requests...</p></div>
+      <p style="color:#777;font-size:13px;line-height:1.6">Verify recipient OTP first. Approved requests transfer the
+        selected owned batch from donor to recipient automatically.</p>
+      <div id="donations">
+        <p class="loading">Loading donation requests...</p>
+      </div>
     </div>
 
     <!-- ===================================================

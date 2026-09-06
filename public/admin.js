@@ -265,6 +265,7 @@ function showPanel() {
 
 
   refreshAdmin();
+  startVisitorAnalytics();
 }
 
 
@@ -1237,4 +1238,63 @@ if (token) {
 
   showPanel();
 
+}
+
+/* =========================================================
+   ADVANCED LIVE VISITOR ANALYTICS
+========================================================= */
+async function loadVisitorAnalytics() {
+  const liveEl = document.getElementById("analyticsLiveUsers");
+  const totalEl = document.getElementById("analyticsTotalVisitors");
+  const todayEl = document.getElementById("analyticsTodayVisitors");
+  const activityEl = document.getElementById("visitorActivity");
+
+  if (!liveEl || !totalEl || !todayEl || !activityEl) return;
+
+  try {
+    const data = await api("/api/admin/analytics/visitors");
+
+    liveEl.textContent = Number(data.liveUsers || 0).toLocaleString("en-IN");
+    totalEl.textContent = Number(data.totalVisitors || 0).toLocaleString("en-IN");
+    todayEl.textContent = Number(data.todayVisitors || 0).toLocaleString("en-IN");
+
+    const rows = Array.isArray(data.visitors) ? data.visitors : [];
+
+    if (!rows.length) {
+      activityEl.innerHTML = '<div class="loading">No visitor activity yet.</div>';
+      return;
+    }
+
+    activityEl.innerHTML = `
+      <div class="visitor-table">
+        ${rows.map(v => {
+          const last = v.lastSeen ? new Date(v.lastSeen) : null;
+          const first = v.firstSeen ? new Date(v.firstSeen) : null;
+          const lastText = last && !Number.isNaN(last.getTime()) ? last.toLocaleString("en-IN") : "-";
+          const firstText = first && !Number.isNaN(first.getTime()) ? first.toLocaleString("en-IN") : "-";
+          return `
+            <div class="visitor-row">
+              <div>
+                <span class="${v.live ? "visitor-live" : "visitor-away"}">
+                  ${v.live ? "● LIVE" : "○ Away"}
+                </span>
+                <strong>${esc(v.page || "/")}</strong>
+              </div>
+              <small>First: ${esc(firstText)}<br>Last seen: ${esc(lastText)}</small>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  } catch (error) {
+    activityEl.innerHTML = `<div class="loading">${esc(error.message || "Unable to load analytics.")}</div>`;
+  }
+}
+
+let visitorAnalyticsTimer = null;
+
+function startVisitorAnalytics() {
+  loadVisitorAnalytics();
+  clearInterval(visitorAnalyticsTimer);
+  visitorAnalyticsTimer = setInterval(loadVisitorAnalytics, 5000);
 }

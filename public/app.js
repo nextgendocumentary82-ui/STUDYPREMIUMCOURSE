@@ -799,19 +799,80 @@ async function startPayment() {
 
     razorpayCheckout.on(
       "payment.failed",
-      function (response) {
+      async function (response) {
 
         console.error(
-          "Razorpay payment failed:",
+          "Razorpay payment.failed:",
           response
         );
 
+        const paymentId =
+          response?.error?.metadata?.payment_id;
+
+        const orderId =
+          response?.error?.metadata?.order_id ||
+          order.orderId;
+
+        // A debit can sometimes be reconciled after Checkout reports a
+        // failure. Ask the server for the real Razorpay status before
+        // telling the customer to pay again.
+        if (paymentId && orderId) {
+          toast("Payment status is being checked...");
+
+          try {
+            for (let attempt = 0; attempt < 5; attempt++) {
+              const check = await fetch(
+                "/api/payments/check-status",
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ orderId, paymentId })
+                }
+              );
+
+              const result = await check.json();
+
+              if (result.success && result.status === "paid") {
+                toast("Payment confirmed. Creating secure access...");
+                const accessResponse = await fetch("/api/access/create", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    orderId: result.orderId,
+                    type: accessType
+                  })
+                });
+
+                const accessResult = await accessResponse.json();
+
+                if (!accessResponse.ok || !accessResult.success) {
+                  throw new Error(accessResult.error || "Could not create secure access.");
+                }
+
+                closePay();
+                toast("Payment verified. Opening access...");
+                setTimeout(() => {
+                  window.location.href = accessResult.url;
+                }, 700);
+                return;
+              }
+
+              if (result.status === "failed") {
+                break;
+              }
+
+              await new Promise(resolve => setTimeout(resolve, 2500));
+            }
+          } catch (error) {
+            console.error("Payment status polling error:", error);
+          }
+        }
+
         toast(
-          "Payment failed or cancelled."
+          "Payment could not be confirmed yet. If money was debited, please wait for the transaction status to update before trying again."
         );
 
         resetPayButton();
-
       }
     );
 
@@ -1109,7 +1170,7 @@ async function loadDonationLeaderboard() {
     if (!rows.length) { el.innerHTML = `<div class="loading">No donations yet. Be the first supporter!</div>`; return; }
     el.innerHTML = rows.map(x => `
       <div class="leader-row ${x.rank <= 3 ? "leader-top" : ""}">
-        <div class="leader-rank">${x.rank <= 3 ? ["🥇", "🥈", "🥉"][x.rank - 1] : "#" + x.rank}</div>
+        <div class="leader-rank">${x.rank <= 3 ? ["🥇","🥈","🥉"][x.rank-1] : "#" + x.rank}</div>
         <div class="leader-name">${esc(x.name)}</div>
         <strong>₹${Number(x.amount || 0).toLocaleString("en-IN")}</strong>
       </div>`).join("");
@@ -1150,81 +1211,6 @@ async function startDonationPayment() {
     new Razorpay(options).open();
   } catch (e) { toast(e.message); }
 }
-
-
-/* =========================================================
-   LIVE VISITOR TRACKING
-========================================================= */
-(function initVisitorAnalytics() {
-  const KEY = "spc_visitor_session_id";
-  const HEARTBEAT_MS = 15000;
-
-  function getSessionId() {
-    let id = localStorage.getItem(KEY);
-    if (!id) {
-      id = (window.crypto && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : "v_" + Date.now() + "_" + Math.random().toString(36).slice(2);
-      localStorage.setItem(KEY, id);
-    }
-    return id;
-  }
-
-  const sessionId = getSessionId();
-
-  async function sendVisit() {
-    try {
-      await fetch("/api/analytics/visit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          page: location.pathname + location.search
-        }),
-        keepalive: true
-      });
-    } catch { }
-  }
-
-  function updateCounter(data) {
-    const live = document.getElementById("liveUserCount");
-    const total = document.getElementById("totalVisitorCount");
-    if (live && Number.isFinite(Number(data.liveUsers))) {
-      live.textContent = Number(data.liveUsers).toLocaleString("en-IN");
-    }
-    if (total && Number.isFinite(Number(data.totalVisitors))) {
-      total.textContent = Number(data.totalVisitors).toLocaleString("en-IN");
-    }
-  }
-
-  async function refreshCounter() {
-    try {
-      const r = await fetch("/api/analytics/public");
-      if (r.ok) updateCounter(await r.json());
-    } catch { }
-  }
-
-  async function heartbeat() {
-    await sendVisit();
-    await refreshCounter();
-  }
-
-  heartbeat();
-  setInterval(heartbeat, HEARTBEAT_MS);
-
-  window.addEventListener("pagehide", () => {
-    try {
-      const body = JSON.stringify({
-        sessionId,
-        page: location.pathname + location.search
-      });
-      navigator.sendBeacon(
-        "/api/analytics/visit",
-        new Blob([body], { type: "application/json" })
-      );
-    } catch { }
-  });
-})();
 
 /* =========================================================
    STARTUP

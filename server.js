@@ -19,7 +19,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const multer = require("multer");
 let nodemailer = null;
-try { nodemailer = require("nodemailer"); } catch { }
+try { nodemailer = require("nodemailer"); } catch {}
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -67,6 +67,95 @@ app.use(
     origin: true,
     credentials: true
   })
+);
+
+// ============================================================
+// RAZORPAY WEBHOOK
+// MUST be registered before express.json()
+// ============================================================
+
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+      const signature = req.headers["x-razorpay-signature"];
+
+      if (!secret) {
+        console.error("RAZORPAY_WEBHOOK_SECRET is missing.");
+        return res.status(500).json({ error: "Webhook secret is not configured." });
+      }
+      if (!signature) {
+        return res.status(400).json({ error: "Missing webhook signature." });
+      }
+
+      const expected = crypto.createHmac("sha256", secret).update(req.body).digest("hex");
+      const a = Buffer.from(expected, "utf8");
+      const b = Buffer.from(String(signature), "utf8");
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.status(400).json({ error: "Invalid webhook signature." });
+      }
+
+      const event = JSON.parse(req.body.toString("utf8"));
+      const payment = event?.payload?.payment?.entity;
+      const orderEntity = event?.payload?.order?.entity;
+      const razorpayOrderId = payment?.order_id || orderEntity?.id || "";
+      const razorpayPaymentId = payment?.id || "";
+
+      if (event.event === "payment.captured" || event.event === "order.paid") {
+        if (razorpayOrderId) {
+          const order = await Order.findOne({ razorpayOrderId });
+          if (order) {
+            if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
+            order.status = "paid";
+            await order.save();
+            await BatchOwnership.findOneAndUpdate(
+              { orderId: order._id },
+              { $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail), orderId: order._id, active: true } },
+              { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+          }
+
+          const donation = await DonationPayment.findOne({ razorpayOrderId });
+          if (donation) {
+            if (razorpayPaymentId) donation.razorpayPaymentId = razorpayPaymentId;
+            donation.status = "paid";
+            await donation.save();
+          }
+        }
+      }
+
+      if (event.event === "payment.authorized" && razorpayOrderId) {
+        const order = await Order.findOne({ razorpayOrderId });
+        if (order && order.status !== "paid") {
+          if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
+          order.status = "created";
+          await order.save();
+        }
+      }
+
+      if (event.event === "payment.failed" && razorpayOrderId) {
+        const order = await Order.findOne({ razorpayOrderId });
+        if (order && order.status !== "paid") {
+          if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
+          order.status = "failed";
+          await order.save();
+        }
+        const donation = await DonationPayment.findOne({ razorpayOrderId });
+        if (donation && donation.status !== "paid") {
+          if (razorpayPaymentId) donation.razorpayPaymentId = razorpayPaymentId;
+          donation.status = "failed";
+          await donation.save();
+        }
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("RAZORPAY WEBHOOK ERROR:", error);
+      return res.status(500).json({ error: "Webhook processing failed." });
+    }
+  }
 );
 
 app.use(
@@ -1199,46 +1288,6 @@ const Settings =
     settingsSchema
   );
 
-
-// ============================================================
-// VISITOR ANALYTICS / LIVE USERS
-// ============================================================
-
-const visitorSessionSchema = new mongoose.Schema({
-  sessionId: { type: String, unique: true, index: true },
-  firstSeen: { type: Date, default: Date.now, index: true },
-  lastSeen: { type: Date, default: Date.now, index: true },
-  page: { type: String, default: "/" },
-  userAgent: { type: String, default: "" }
-}, { timestamps: true });
-
-const VisitorSession = mongoose.model("VisitorSession", visitorSessionSchema);
-
-const VISITOR_LIVE_WINDOW_MS = 45 * 1000;
-
-async function touchVisitor(sessionId, page = "/") {
-  if (!sessionId || typeof sessionId !== "string" || sessionId.length < 10 || sessionId.length > 120) {
-    return null;
-  }
-
-  const safePage = String(page || "/").slice(0, 300);
-
-  return VisitorSession.findOneAndUpdate(
-    { sessionId },
-    {
-      $set: {
-        lastSeen: new Date(),
-        page: safePage,
-        userAgent: ""
-      },
-      $setOnInsert: {
-        firstSeen: new Date()
-      }
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-}
-
 // ============================================================
 // RAZORPAY
 // ============================================================
@@ -1553,85 +1602,6 @@ function requireAdmin(
     });
   }
 }
-
-
-// ============================================================
-// VISITOR ANALYTICS API
-// ============================================================
-
-// Create/update a visitor session. The browser sends this on first load
-// and then periodically as a heartbeat.
-app.post("/api/analytics/visit", async (req, res) => {
-  try {
-    const sessionId = String(req.body.sessionId || "").trim();
-    const page = String(req.body.page || "/").slice(0, 300);
-
-    if (!sessionId || sessionId.length < 10 || sessionId.length > 120) {
-      return res.status(400).json({ error: "Invalid visitor session." });
-    }
-
-    await VisitorSession.findOneAndUpdate(
-      { sessionId },
-      {
-        $set: {
-          lastSeen: new Date(),
-          page,
-          userAgent: String(req.headers["user-agent"] || "").slice(0, 500)
-        },
-        $setOnInsert: {
-          firstSeen: new Date()
-        }
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error("VISITOR TRACKING ERROR:", error);
-    res.status(500).json({ error: "Visitor tracking failed." });
-  }
-});
-
-// Admin-only live visitor analytics.
-app.get("/api/admin/analytics/visitors", requireAdmin, async (req, res) => {
-  try {
-    const now = Date.now();
-    const liveSince = new Date(now - VISITOR_LIVE_WINDOW_MS);
-
-    const [totalVisitors, liveUsers, todayVisitors, recentVisitors] = await Promise.all([
-      VisitorSession.countDocuments({}),
-      VisitorSession.countDocuments({ lastSeen: { $gte: liveSince } }),
-      VisitorSession.countDocuments({
-        firstSeen: {
-          $gte: new Date(new Date().setHours(0, 0, 0, 0))
-        }
-      }),
-      VisitorSession.find({})
-        .sort({ lastSeen: -1 })
-        .limit(30)
-        .select("sessionId firstSeen lastSeen page")
-        .lean()
-    ]);
-
-    res.json({
-      success: true,
-      liveUsers,
-      totalVisitors,
-      todayVisitors,
-      liveWindowSeconds: VISITOR_LIVE_WINDOW_MS / 1000,
-      visitors: recentVisitors.map(v => ({
-        sessionId: v.sessionId,
-        firstSeen: v.firstSeen,
-        lastSeen: v.lastSeen,
-        page: v.page,
-        live: new Date(v.lastSeen).getTime() >= now - VISITOR_LIVE_WINDOW_MS
-      }))
-    });
-  } catch (error) {
-    console.error("VISITOR ANALYTICS ERROR:", error);
-    res.status(500).json({ error: "Unable to load visitor analytics." });
-  }
-});
 
 // ============================================================
 // ACCESS AUTH
@@ -1949,7 +1919,7 @@ app.post("/api/donations/payment/verify", async (req, res) => {
       .digest("hex");
 
     if (expected.length !== String(razorpay_signature).length ||
-      !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(razorpay_signature)))) {
+        !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(razorpay_signature)))) {
       return res.status(400).json({ error: "Payment signature verification failed." });
     }
 
@@ -2307,106 +2277,57 @@ app.post(
   "/api/payments/verify",
   async (req, res) => {
     try {
-      const {
-        razorpay_order_id,
-        razorpay_payment_id,
-        razorpay_signature
-      } = req.body;
+      const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
-      if (
-        !razorpay_order_id ||
-        !razorpay_payment_id ||
-        !razorpay_signature
-      ) {
-        return res.status(400).json({
-          error:
-            "Incomplete payment verification data"
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return res.status(400).json({ error: "Incomplete payment verification data" });
+      }
+
+      const secret = process.env.RAZORPAY_KEY_SECRET;
+      if (!secret) {
+        return res.status(503).json({ error: "Payment verification is not configured." });
+      }
+
+      const expected = crypto.createHmac("sha256", secret)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest("hex");
+      const a = Buffer.from(expected, "utf8");
+      const b = Buffer.from(String(razorpay_signature), "utf8");
+
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.status(400).json({ error: "Payment signature verification failed" });
+      }
+
+      const order = await Order.findOne({ razorpayOrderId: razorpay_order_id });
+      if (!order) return res.status(404).json({ error: "Order not found" });
+
+      const rp = getRazorpay();
+      if (!rp) return res.status(503).json({ error: "Razorpay is not configured on the server." });
+
+      const payment = await rp.payments.fetch(razorpay_payment_id);
+
+      if (payment.order_id !== razorpay_order_id) {
+        return res.status(400).json({ error: "Payment does not belong to this order." });
+      }
+
+      if (payment.status !== "captured") {
+        if (payment.status === "failed" && order.status !== "paid") {
+          order.razorpayPaymentId = razorpay_payment_id;
+          order.status = "failed";
+          await order.save();
+        }
+        return res.status(202).json({
+          success: false,
+          pending: payment.status !== "failed",
+          status: payment.status,
+          error: payment.status === "failed"
+            ? "Razorpay reports this payment as failed. If money was debited, wait for reconciliation before trying again."
+            : "Payment is not captured yet. Please wait for confirmation."
         });
       }
 
-      if (
-        !process.env
-          .RAZORPAY_KEY_SECRET
-      ) {
-        return res.status(503).json({
-          error:
-            "Payment verification is not configured."
-        });
-      }
-
-      const expected =
-        crypto
-          .createHmac(
-            "sha256",
-            process.env
-              .RAZORPAY_KEY_SECRET
-          )
-          .update(
-            `${razorpay_order_id}|${razorpay_payment_id}`
-          )
-          .digest("hex");
-
-      const expectedBuffer =
-        Buffer.from(
-          expected
-        );
-
-      const receivedBuffer =
-        Buffer.from(
-          razorpay_signature
-        );
-
-      if (
-        expectedBuffer.length !==
-        receivedBuffer.length
-      ) {
-        return res.status(400).json({
-          error:
-            "Payment signature verification failed"
-        });
-      }
-
-      if (
-        !crypto.timingSafeEqual(
-          expectedBuffer,
-          receivedBuffer
-        )
-      ) {
-        return res.status(400).json({
-          error:
-            "Payment signature verification failed"
-        });
-      }
-
-      const order =
-        await Order.findOne({
-          razorpayOrderId:
-            razorpay_order_id
-        });
-
-      if (!order) {
-        return res.status(404).json({
-          error:
-            "Order not found"
-        });
-      }
-
-      if (
-        order.status ===
-        "paid"
-      ) {
-        return res.status(400).json({
-          error:
-            "This payment has already been processed"
-        });
-      }
-
-      order.razorpayPaymentId =
-        razorpay_payment_id;
-
-      order.status =
-        "paid";
-
+      order.razorpayPaymentId = razorpay_payment_id;
+      order.status = "paid";
       await order.save();
 
       await BatchOwnership.findOneAndUpdate(
@@ -2415,56 +2336,83 @@ app.post(
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      const item =
-        await AppModel.findById(
-          order.appId
-        ).lean();
+      const item = await AppModel.findById(order.appId).lean();
+      if (!item) return res.status(404).json({ error: "Purchased item no longer exists" });
 
-      if (!item) {
-        return res.status(404).json({
-          error:
-            "Purchased item no longer exists"
-        });
-      }
-
-      res.json({
-        success:
-          true,
-
-        orderId:
-          order._id,
-
+      return res.json({
+        success: true,
+        status: "paid",
+        orderId: order._id,
+        paymentId: razorpay_payment_id,
         app: {
-          id:
-            item._id,
-
-          name:
-            item.name,
-
-          websiteUrl:
-            item.websiteUrl,
-
-          downloadUrl:
-            item.downloadUrl,
-
-          appFileKey:
-            item.appFileKey ||
-            "",
-
-          validity:
-            item.validity
+          id: item._id,
+          name: item.name,
+          websiteUrl: item.websiteUrl,
+          downloadUrl: item.downloadUrl,
+          appFileKey: item.appFileKey || "",
+          validity: item.validity
         }
       });
     } catch (error) {
-      console.error(
-        "VERIFY PAYMENT ERROR:",
-        error
-      );
+      console.error("VERIFY PAYMENT ERROR:", error);
+      return res.status(500).json({ error: "Payment verification failed" });
+    }
+  }
+);
 
-      res.status(500).json({
-        error:
-          "Payment verification failed"
-      });
+// ============================================================
+// CHECK PAYMENT STATUS
+// ============================================================
+
+app.post(
+  "/api/payments/check-status",
+  async (req, res) => {
+    try {
+      const orderId = String(req.body.orderId || "").trim();
+      const paymentId = String(req.body.paymentId || "").trim();
+
+      if (!orderId || !paymentId) {
+        return res.status(400).json({ error: "Order ID and payment ID are required." });
+      }
+
+      const rp = getRazorpay();
+      if (!rp) return res.status(503).json({ error: "Razorpay is not configured on the server." });
+
+      const order = await Order.findOne({ razorpayOrderId: orderId });
+      if (!order) return res.status(404).json({ error: "Order not found." });
+
+      const payment = await rp.payments.fetch(paymentId);
+      if (payment.order_id !== orderId) {
+        return res.status(400).json({ error: "Payment does not belong to this order." });
+      }
+
+      if (payment.status === "captured") {
+        order.razorpayPaymentId = paymentId;
+        order.status = "paid";
+        await order.save();
+
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          { $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail), orderId: order._id, active: true } },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        return res.json({ success: true, status: "paid", orderId: order._id, paymentId });
+      }
+
+      if (payment.status === "failed") {
+        if (order.status !== "paid") {
+          order.razorpayPaymentId = paymentId;
+          order.status = "failed";
+          await order.save();
+        }
+        return res.json({ success: false, status: "failed" });
+      }
+
+      return res.json({ success: false, pending: true, status: payment.status });
+    } catch (error) {
+      console.error("CHECK PAYMENT STATUS ERROR:", error);
+      return res.status(500).json({ error: "Could not check payment status." });
     }
   }
 );

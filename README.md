@@ -104,3 +104,22 @@ Uploaded images are served through `/api/media`. Paid APK access is created only
 No `node_modules` should be committed. Render installs dependencies with `npm install` and starts with `npm start`.
 
 The project requires Node 18+ because it uses the built-in `fetch` API.
+
+## Razorpay webhook setup
+
+After deploying on Render, add this environment variable:
+
+`RAZORPAY_WEBHOOK_SECRET`
+
+Use a strong secret that you also enter in the Razorpay Dashboard webhook configuration. Set the webhook URL to:
+
+`https://YOUR-RENDER-SERVICE.onrender.com/api/payments/webhook`
+
+Enable these events:
+
+- `payment.authorized`
+- `payment.captured`
+- `payment.failed`
+- `order.paid`
+
+The server verifies the Checkout signature and then fetches the real Razorpay payment status. Access is granted only when Razorpay reports the payment as `captured`. The webhook also reconciles captured payments if the browser closes or Checkout reports a temporary failure.

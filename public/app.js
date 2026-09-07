@@ -649,6 +649,17 @@ function closePay() {
    PAYMENT
 ========================================================= */
 
+async function loadPurchaseDurations() {
+  try {
+    const r = await fetch("/api/purchase-durations");
+    const data = await r.json();
+    const select = document.getElementById("purchaseDuration");
+    if (!select || !r.ok) return;
+    select.innerHTML = (data.durations || []).map(x => `<option value="${esc(x.key)}">${esc(x.label)}</option>`).join("");
+    if (data.defaultDuration) select.value = data.defaultDuration;
+  } catch (e) { console.warn("Purchase durations could not load", e); }
+}
+
 async function startPayment() {
 
   if (!currentApp) {
@@ -673,6 +684,8 @@ async function startPayment() {
       .getElementById("buyerPhone")
       ?.value
       ?.trim();
+
+  const purchaseDuration = document.getElementById("purchaseDuration")?.value || "1_year";
 
   if (!name) {
 
@@ -707,12 +720,12 @@ async function startPayment() {
     document.getElementById("paymentGateway")?.value || "cashfree";
 
   if (selectedGateway === "cashfree") {
-    await startCashfreePayment({ name, email, phone });
+    await startCashfreePayment({ name, email, phone, purchaseDuration });
     return;
   }
 
   if (selectedGateway === "upi_qr") {
-    await startUpiQrPayment({ name, email, phone });
+    await startUpiQrPayment({ name, email, phone, purchaseDuration });
     return;
   }
 
@@ -753,7 +766,9 @@ async function startPayment() {
 
             customerEmail: email,
 
-            customerPhone: phone
+            customerPhone: phone,
+
+            purchaseDuration
 
           })
         }
@@ -957,8 +972,10 @@ async function startPayment() {
 ========================================================= */
 
 let activeQrOrderId = "";
+let activeQrStatusTimer = null;
 
-async function startUpiQrPayment({ name, email, phone }) {
+async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_year" }) {
+  stopQrStatusPolling();
   const payButton = document.getElementById("payButton");
   if (!phone) {
     toast("Please enter your mobile number.");
@@ -978,7 +995,8 @@ async function startUpiQrPayment({ name, email, phone }) {
         appId: currentApp._id,
         customerName: name,
         customerEmail: email,
-        customerPhone: phone
+        customerPhone: phone,
+        purchaseDuration
       })
     });
 
@@ -1009,9 +1027,45 @@ async function startUpiQrPayment({ name, email, phone }) {
   }
 }
 
+function stopQrStatusPolling() {
+  if (activeQrStatusTimer) {
+    clearInterval(activeQrStatusTimer);
+    activeQrStatusTimer = null;
+  }
+}
+
 function closeQrPayment() {
+  stopQrStatusPolling();
   document.getElementById("qrPayModal")?.classList.add("hidden");
   activeQrOrderId = "";
+}
+
+async function pollUpiQrStatus(email, phone) {
+  if (!activeQrOrderId) return;
+  try {
+    const response = await fetch("/api/payments/upi-qr/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId: activeQrOrderId, email, phone })
+    });
+    const result = await response.json();
+    if (!response.ok) return;
+
+    if (result.status === "paid") {
+      stopQrStatusPolling();
+      const text = document.getElementById("qrPayText");
+      if (text) text.textContent = "Payment verified! Course access is active. Login with the same payment email to open it.";
+      const button = document.getElementById("upiSubmitButton");
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Payment Approved — Open Course";
+        button.onclick = () => { window.location.href = "/account.html"; };
+      }
+      toast("Payment approved! Course access is active.");
+    }
+  } catch (error) {
+    console.warn("UPI status check failed:", error);
+  }
 }
 
 async function submitUpiQrPayment() {
@@ -1047,7 +1101,13 @@ async function submitUpiQrPayment() {
     document.getElementById("qrPayText").textContent =
       "Reference submitted. Access will unlock automatically only after the admin verifies the real transaction in the UPI/bank account.";
     if (button) button.textContent = "Verification Pending";
-    toast("Payment reference submitted. Please wait for verification.");
+    toast("Payment reference submitted. We will auto-check admin approval.");
+
+    stopQrStatusPolling();
+    const email = document.getElementById("buyerEmail")?.value?.trim() || "";
+    const phone = document.getElementById("buyerPhone")?.value?.trim() || "";
+    await pollUpiQrStatus(email, phone);
+    activeQrStatusTimer = setInterval(() => pollUpiQrStatus(email, phone), 4000);
   } catch (error) {
     console.error("UPI QR submit error:", error);
     toast(error.message || "Could not submit payment reference.");
@@ -1062,7 +1122,7 @@ async function submitUpiQrPayment() {
    CASHFREE PAYMENT
 ========================================================= */
 
-async function startCashfreePayment({ name, email, phone }) {
+async function startCashfreePayment({ name, email, phone, purchaseDuration = "1_year" }) {
   const payButton = document.getElementById("payButton");
 
   if (!phone) {
@@ -1087,7 +1147,8 @@ async function startCashfreePayment({ name, email, phone }) {
         appId: currentApp._id,
         customerName: name,
         customerEmail: email,
-        customerPhone: phone
+        customerPhone: phone,
+        purchaseDuration
       })
     });
 
@@ -1478,6 +1539,81 @@ async function startDonationPayment() {
     };
     new Razorpay(options).open();
   } catch (e) { toast(e.message); }
+}
+
+async function startCashfreeDonationPayment() {
+  const donorName = document.getElementById("donorName")?.value.trim();
+  const donorEmail = document.getElementById("donorEmail")?.value.trim();
+  const amount = Number(document.getElementById("donorAmount")?.value || 0);
+
+  if (!donorName || !donorEmail || amount < 1) {
+    toast("Enter your name, email and donation amount.");
+    return;
+  }
+
+  if (typeof Cashfree === "undefined") {
+    toast("Cashfree checkout could not load.");
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/donations/payment/cashfree/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ donorName, donorEmail, amount })
+    });
+
+    const order = await response.json();
+    if (!response.ok || !order.success || !order.paymentSessionId) {
+      throw new Error(order.error || "Cashfree donation order could not be created.");
+    }
+
+    const cashfree = Cashfree({
+      mode: order.mode === "sandbox" ? "sandbox" : "production"
+    });
+
+    toast("Opening Cashfree secure checkout...");
+
+    const result = await cashfree.checkout({
+      paymentSessionId: order.paymentSessionId,
+      redirectTarget: "_modal"
+    });
+
+    if (result?.error) {
+      throw new Error(result.error.message || "Cashfree checkout failed.");
+    }
+
+    toast("Checking Cashfree donation payment...");
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const verifyResponse = await fetch("/api/donations/payment/cashfree/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: order.orderId })
+      });
+
+      const verified = await verifyResponse.json();
+
+      if (verifyResponse.ok && verified.success && verified.status === "paid") {
+        toast("❤️ Donation received. Thank you!");
+        document.getElementById("donorAmount").value = "";
+        await loadDonationLeaderboard();
+        return;
+      }
+
+      if (verifyResponse.ok && verified.status === "failed") {
+        throw new Error(verified.message || "Donation payment was not completed.");
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+
+    toast("Payment submitted. It may take a little time to appear on the leaderboard.");
+    await loadDonationLeaderboard();
+  } catch (e) {
+    console.error("Cashfree donation error:", e);
+    toast(e.message || "Cashfree donation payment failed.");
+  }
 }
 
 /* =========================================================

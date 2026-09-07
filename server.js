@@ -205,6 +205,27 @@ app.post(
         return res.json({ received: true });
       }
 
+      // Donation payments use the same verified Cashfree webhook.
+      // Check DonationPayment before the course Order so both flows can coexist.
+      const donation = await DonationPayment.findOne({ cashfreeOrderId });
+      if (donation) {
+        if (type === "PAYMENT_SUCCESS_WEBHOOK" && paymentStatus === "SUCCESS") {
+          donation.cashfreePaymentId = cashfreePaymentId;
+          donation.paymentGateway = "cashfree";
+          donation.status = "paid";
+          await donation.save();
+        } else if (
+          (type === "PAYMENT_FAILED_WEBHOOK" || type === "PAYMENT_USER_DROPPED_WEBHOOK") &&
+          donation.status !== "paid"
+        ) {
+          donation.cashfreePaymentId = cashfreePaymentId;
+          donation.paymentGateway = "cashfree";
+          donation.status = "failed";
+          await donation.save();
+        }
+        return res.json({ received: true });
+      }
+
       const order = await Order.findOne({ cashfreeOrderId });
       if (!order) {
         return res.json({ received: true });
@@ -215,18 +236,7 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await grantBatchOwnership(order);
       }
 
       if (
@@ -1238,6 +1248,17 @@ const orderSchema =
       customerPhone: {
         type: String,
         default: ""
+      },
+
+      purchaseDuration: {
+        type: String,
+        enum: ["2_months", "3_months", "1_year", "lifetime"],
+        default: "1_year"
+      },
+
+      purchaseDurationLabel: {
+        type: String,
+        default: "1 Year"
       }
     },
     {
@@ -1334,6 +1355,16 @@ const settingsSchema =
         type: String,
         default:
           "LEARN • PREPARE • SUCCEED"
+      },
+
+      purchaseDurations: {
+        type: [String],
+        default: ["2_months", "3_months", "1_year"]
+      },
+
+      defaultPurchaseDuration: {
+        type: String,
+        default: "1_year"
       }
     },
     {
@@ -1379,6 +1410,10 @@ const batchOwnershipSchema = new mongoose.Schema({
   ownerEmail: { type: String, required: true, lowercase: true, trim: true, index: true },
   orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
   active: { type: Boolean, default: true },
+  purchaseDuration: { type: String, enum: ["2_months", "3_months", "1_year", "lifetime"], default: "1_year" },
+  purchaseDurationLabel: { type: String, default: "1 Year" },
+  startsAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, default: null, index: true },
   donatedAt: { type: Date, default: null }
 }, { timestamps: true });
 
@@ -1406,6 +1441,9 @@ const donationPaymentSchema = new mongoose.Schema({
   currency: { type: String, default: "INR" },
   razorpayOrderId: { type: String, unique: true, sparse: true },
   razorpayPaymentId: { type: String, default: "" },
+  cashfreeOrderId: { type: String, unique: true, sparse: true },
+  cashfreePaymentId: { type: String, default: "" },
+  paymentGateway: { type: String, enum: ["razorpay", "cashfree"], default: "razorpay" },
   status: { type: String, enum: ["created", "paid", "failed"], default: "created" }
 }, { timestamps: true });
 
@@ -1928,11 +1966,69 @@ app.get("/api/auth/me", requireUser, (req, res) => {
 });
 
 // ============================================================
+// BATCH PURCHASE DURATION + OWNERSHIP HELPERS
+// ============================================================
+const PURCHASE_DURATIONS = {
+  "2_months": { label: "2 Months", months: 2 },
+  "3_months": { label: "3 Months", months: 3 },
+  "1_year": { label: "1 Year", months: 12 },
+  "lifetime": { label: "Lifetime", months: null }
+};
+
+function normalizePurchaseDuration(value) {
+  const key = String(value || "1_year").trim();
+  return PURCHASE_DURATIONS[key] ? key : "1_year";
+}
+
+function calculateExpiry(durationKey, fromDate = new Date()) {
+  const duration = PURCHASE_DURATIONS[normalizePurchaseDuration(durationKey)];
+  if (!duration || duration.months === null) return null;
+  const d = new Date(fromDate);
+  d.setMonth(d.getMonth() + duration.months);
+  return d;
+}
+
+async function grantBatchOwnership(order) {
+  if (!order || order.status !== "paid") return null;
+  const durationKey = normalizePurchaseDuration(order.purchaseDuration);
+  const existing = await BatchOwnership.findOne({ orderId: order._id });
+  if (existing) {
+    if (!existing.expiresAt && durationKey !== "lifetime") {
+      existing.expiresAt = calculateExpiry(durationKey, existing.startsAt || existing.createdAt || new Date());
+    }
+    existing.purchaseDuration = durationKey;
+    existing.purchaseDurationLabel = PURCHASE_DURATIONS[durationKey].label;
+    existing.ownerEmail = normalizeEmail(order.customerEmail);
+    existing.active = true;
+    await existing.save();
+    return existing;
+  }
+  return BatchOwnership.create({
+    appId: order.appId,
+    ownerEmail: normalizeEmail(order.customerEmail),
+    orderId: order._id,
+    active: true,
+    purchaseDuration: durationKey,
+    purchaseDurationLabel: PURCHASE_DURATIONS[durationKey].label,
+    startsAt: new Date(),
+    expiresAt: calculateExpiry(durationKey)
+  });
+}
+
+async function expireOldBatchOwnerships() {
+  await BatchOwnership.updateMany(
+    { active: true, expiresAt: { $ne: null, $lte: new Date() } },
+    { $set: { active: false } }
+  );
+}
+
+// ============================================================
 // MY BATCHES
 // ============================================================
 
 app.get("/api/my-batches", requireUser, async (req, res) => {
   try {
+    await expireOldBatchOwnerships();
     const ownerships = await BatchOwnership.find({ ownerEmail: req.user.email, active: true })
       .populate("appId")
       .sort({ createdAt: -1 })
@@ -1941,6 +2037,10 @@ app.get("/api/my-batches", requireUser, async (req, res) => {
       ownershipId: o._id,
       purchasedAt: o.createdAt,
       donatedAt: o.donatedAt,
+      purchaseDuration: o.purchaseDuration,
+      purchaseDurationLabel: o.purchaseDurationLabel,
+      startsAt: o.startsAt,
+      expiresAt: o.expiresAt,
       batch: o.appId
     })));
   } catch (error) {
@@ -1951,6 +2051,7 @@ app.get("/api/my-batches", requireUser, async (req, res) => {
 
 app.post("/api/my-batches/access", requireUser, async (req, res) => {
   try {
+    await expireOldBatchOwnerships();
     const ownership = await BatchOwnership.findOne({ _id: req.body.ownershipId, ownerEmail: req.user.email, active: true });
     if (!ownership) return res.status(404).json({ error: "Batch ownership not found." });
     const item = await AppModel.findById(ownership.appId).lean();
@@ -1960,7 +2061,8 @@ app.post("/api/my-batches/access", requireUser, async (req, res) => {
     const type = String(req.body.type || "app");
     if (!["app", "website"].includes(type)) return res.status(400).json({ error: "Invalid access type." });
     const token = createAccessToken();
-    await Access.create({ tokenHash: hashAccessToken(token), orderId: order._id, appId: item._id, type, expiresAt: new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000) });
+    const accessExpiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+    await Access.create({ tokenHash: hashAccessToken(token), orderId: order._id, appId: item._id, type, expiresAt: accessExpiresAt });
     res.json({ success: true, url: `/api/access/${type === "website" ? "website" : "download"}?token=${encodeURIComponent(token)}` });
   } catch (error) {
     console.error("MY BATCH ACCESS ERROR:", error);
@@ -2160,6 +2262,146 @@ app.post("/api/donations/payment/verify", async (req, res) => {
   }
 });
 
+// ============================================================
+// CASHFREE DONATION PAYMENT
+// Uses the same Cashfree webhook as course payments.
+// ============================================================
+
+app.post("/api/donations/payment/cashfree/order", async (req, res) => {
+  try {
+    const donorName = String(req.body.donorName || "").trim();
+    const donorEmail = normalizeEmail(req.body.donorEmail);
+    const amount = Math.round(Number(req.body.amount || 0));
+
+    if (!donorName || donorName.length < 2) {
+      return res.status(400).json({ error: "Please enter your name." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(donorEmail)) {
+      return res.status(400).json({ error: "Please enter a valid email." });
+    }
+    if (!Number.isFinite(amount) || amount < 1) {
+      return res.status(400).json({ error: "Minimum donation is ₹1." });
+    }
+
+    const cf = getCashfreeConfig();
+    if (!cf) {
+      return res.status(503).json({ error: "Cashfree is not configured on the server." });
+    }
+
+    const cashfreeOrderId = `donate_cf_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
+    const publicUrl = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
+
+    const orderBody = {
+      order_id: cashfreeOrderId,
+      order_amount: amount,
+      order_currency: "INR",
+      customer_details: {
+        customer_id: `donor_${crypto.createHash("sha256").update(donorEmail).digest("hex").slice(0, 20)}`,
+        customer_name: donorName.slice(0, 100),
+        customer_email: donorEmail,
+        customer_phone: "9999999999"
+      },
+      order_note: "STUDY PREMIUM COURSE Donation",
+      order_tags: {
+        donation: "true",
+        donor_email: donorEmail
+      }
+    };
+
+    if (publicUrl) {
+      orderBody.order_meta = {
+        return_url: `${publicUrl}/?donation=cashfree&order_id={order_id}`,
+        notify_url: `${publicUrl}/api/payments/cashfree/webhook`
+      };
+    }
+
+    const cashfreeOrder = await cashfreeRequest("/orders", {
+      method: "POST",
+      headers: { "x-idempotency-key": cashfreeOrderId },
+      body: orderBody
+    });
+
+    await DonationPayment.create({
+      donorName,
+      donorEmail,
+      amount,
+      currency: "INR",
+      cashfreeOrderId,
+      cashfreePaymentId: "",
+      paymentGateway: "cashfree",
+      status: "created"
+    });
+
+    return res.json({
+      success: true,
+      gateway: "cashfree",
+      orderId: cashfreeOrderId,
+      paymentSessionId: cashfreeOrder.payment_session_id,
+      mode: cf.environment,
+      amount,
+      currency: "INR"
+    });
+  } catch (error) {
+    console.error("CREATE CASHFREE DONATION ERROR:", error?.details || error);
+    return res.status(error.statusCode || 500).json({
+      error: error.message || "Could not create Cashfree donation payment."
+    });
+  }
+});
+
+app.post("/api/donations/payment/cashfree/verify", async (req, res) => {
+  try {
+    const cashfreeOrderId = String(req.body.orderId || "").trim();
+    if (!cashfreeOrderId) {
+      return res.status(400).json({ error: "Cashfree donation order ID is required." });
+    }
+
+    const donation = await DonationPayment.findOne({ cashfreeOrderId });
+    if (!donation) {
+      return res.status(404).json({ error: "Donation payment not found." });
+    }
+    if (donation.status === "paid") {
+      return res.json({ success: true, status: "paid", message: "Donation already recorded." });
+    }
+
+    const cashfreeOrder = await cashfreeRequest(`/orders/${encodeURIComponent(cashfreeOrderId)}`);
+    const orderStatus = String(cashfreeOrder.order_status || "").toUpperCase();
+
+    if (orderStatus === "PAID") {
+      try {
+        const payments = await cashfreeRequest(`/orders/${encodeURIComponent(cashfreeOrderId)}/payments`);
+        const successfulPayment = Array.isArray(payments)
+          ? payments.find(p => String(p.payment_status || "").toUpperCase() === "SUCCESS")
+          : null;
+        if (successfulPayment?.cf_payment_id) {
+          donation.cashfreePaymentId = String(successfulPayment.cf_payment_id);
+        }
+      } catch (paymentLookupError) {
+        console.warn("CASHFREE DONATION PAYMENT LOOKUP WARNING:", paymentLookupError?.message || paymentLookupError);
+      }
+
+      donation.paymentGateway = "cashfree";
+      donation.status = "paid";
+      await donation.save();
+
+      return res.json({ success: true, status: "paid", message: "Donation received successfully." });
+    }
+
+    if (["EXPIRED", "TERMINATED", "CANCELLED"].includes(orderStatus)) {
+      donation.status = "failed";
+      await donation.save();
+      return res.json({ success: true, status: "failed", message: "Donation payment was not completed." });
+    }
+
+    return res.json({ success: true, status: "pending", message: "Payment is still being processed." });
+  } catch (error) {
+    console.error("VERIFY CASHFREE DONATION ERROR:", error?.details || error);
+    return res.status(error.statusCode || 500).json({
+      error: error.message || "Could not verify Cashfree donation payment."
+    });
+  }
+});
+
 app.get("/api/donations/leaderboard", async (req, res) => {
   try {
     const rows = await DonationPayment.aggregate([
@@ -2331,6 +2573,20 @@ app.get(
   }
 );
 
+// PUBLIC PURCHASE DURATION SETTINGS
+app.get("/api/purchase-durations", async (req, res) => {
+  try {
+    const settings = await Settings.findOne({ key: "main" }).lean();
+    const keys = Array.isArray(settings?.purchaseDurations) && settings.purchaseDurations.length
+      ? settings.purchaseDurations.filter(k => PURCHASE_DURATIONS[k])
+      : ["2_months", "3_months", "1_year"];
+    const defaultKey = keys.includes(settings?.defaultPurchaseDuration) ? settings.defaultPurchaseDuration : keys[0] || "1_year";
+    res.json({ durations: keys.map(key => ({ key, label: PURCHASE_DURATIONS[key].label })), defaultDuration: defaultKey });
+  } catch (error) {
+    res.json({ durations: ["2_months", "3_months", "1_year"].map(key => ({ key, label: PURCHASE_DURATIONS[key].label })), defaultDuration: "1_year" });
+  }
+});
+
 // ============================================================
 // PAYMENT ORDER
 // ============================================================
@@ -2343,7 +2599,8 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = ""
+        customerPhone = "",
+        purchaseDuration = "1_year"
       } = req.body;
 
       if (!appId) {
@@ -2450,7 +2707,10 @@ app.post(
           customerEmail.trim(),
 
         customerPhone:
-          customerPhone.trim()
+          customerPhone.trim(),
+
+        purchaseDuration: normalizePurchaseDuration(purchaseDuration),
+        purchaseDurationLabel: PURCHASE_DURATIONS[normalizePurchaseDuration(purchaseDuration)].label
       });
 
       res.json({
@@ -2507,7 +2767,8 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = ""
+        customerPhone = "",
+        purchaseDuration = "1_year"
       } = req.body;
 
       if (!appId) return res.status(400).json({ error: "App ID is required" });
@@ -2569,7 +2830,9 @@ app.post(
         status: "created",
         customerName: String(customerName).trim(),
         customerEmail: String(customerEmail).trim().toLowerCase(),
-        customerPhone: String(customerPhone).trim()
+        customerPhone: String(customerPhone).trim(),
+        purchaseDuration: normalizePurchaseDuration(purchaseDuration),
+        purchaseDurationLabel: PURCHASE_DURATIONS[normalizePurchaseDuration(purchaseDuration)].label
       });
 
       return res.json({
@@ -2617,18 +2880,7 @@ app.post(
         order.cashfreeCfOrderId = String(cashfreeOrder.cf_order_id || order.cashfreeCfOrderId || "");
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await grantBatchOwnership(order);
 
         return res.json({
           success: true,
@@ -2669,7 +2921,7 @@ app.post(
 
 app.post("/api/payments/upi-qr/order", async (req, res) => {
   try {
-    const { appId, customerName = "", customerEmail = "", customerPhone = "" } = req.body;
+    const { appId, customerName = "", customerEmail = "", customerPhone = "", purchaseDuration = "1_year" } = req.body;
 
     if (!appId) return res.status(400).json({ error: "App ID is required" });
     if (!String(customerName).trim()) return res.status(400).json({ error: "Customer name is required" });
@@ -2693,7 +2945,9 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
       status: "created",
       customerName: String(customerName).trim().slice(0, 100),
       customerEmail: String(customerEmail).trim().toLowerCase(),
-      customerPhone: String(customerPhone).trim().slice(0, 15)
+      customerPhone: String(customerPhone).trim().slice(0, 15),
+      purchaseDuration: normalizePurchaseDuration(purchaseDuration),
+      purchaseDurationLabel: PURCHASE_DURATIONS[normalizePurchaseDuration(purchaseDuration)].label
     });
 
     return res.json({
@@ -2742,6 +2996,53 @@ app.post("/api/payments/upi-qr/submit", async (req, res) => {
     return res.status(500).json({ error: "Could not submit payment reference" });
   }
 });
+
+// ============================================================
+// UPI QR PAYMENT STATUS / AUTO ACCESS SYNC
+// ============================================================
+app.post("/api/payments/upi-qr/status", async (req, res) => {
+  try {
+    const upiOrderId = String(req.body.orderId || "").trim();
+    const email = normalizeEmail(req.body.email || "");
+    const phone = String(req.body.phone || "").replace(/\D/g, "");
+
+    if (!upiOrderId || !email || !phone) {
+      return res.status(400).json({ error: "Order ID, email and phone are required." });
+    }
+
+    const order = await Order.findOne({ upiOrderId });
+    if (!order) return res.status(404).json({ error: "QR order not found." });
+
+    const orderEmail = normalizeEmail(order.customerEmail);
+    const orderPhone = String(order.customerPhone || "").replace(/\D/g, "");
+    if (orderEmail !== email || orderPhone !== phone) {
+      return res.status(403).json({ error: "Payment details do not match this order." });
+    }
+
+    if (order.status === "paid") {
+      const ownership = await grantBatchOwnership(order);
+      return res.json({
+        success: true,
+        status: "paid",
+        orderId: order._id,
+        ownershipId: ownership?._id || null,
+        ownerEmail: orderEmail,
+        expiresAt: ownership?.expiresAt || null,
+        purchaseDuration: ownership?.purchaseDuration || order.purchaseDuration
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: order.status,
+      pending: ["created", "pending_verification"].includes(order.status)
+    });
+  } catch (error) {
+    console.error("UPI QR STATUS ERROR:", error);
+    return res.status(500).json({ error: "Could not check payment status." });
+  }
+});
+
 
 // ============================================================
 // PAYMENT VERIFY
@@ -2804,11 +3105,7 @@ app.post(
       order.status = "paid";
       await order.save();
 
-      await BatchOwnership.findOneAndUpdate(
-        { orderId: order._id },
-        { $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail), orderId: order._id, active: true } },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+      await grantBatchOwnership(order);
 
       const item = await AppModel.findById(order.appId).lean();
       if (!item) return res.status(404).json({ error: "Purchased item no longer exists" });
@@ -2865,11 +3162,7 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          { $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail), orderId: order._id, active: true } },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await grantBatchOwnership(order);
 
         return res.json({ success: true, status: "paid", orderId: order._id, paymentId });
       }
@@ -3954,6 +4247,24 @@ app.post(
   }
 );
 
+app.get("/api/admin/purchase-durations", requireAdmin, async (req, res) => {
+  try {
+    const settings = await Settings.findOne({ key: "main" }).lean();
+    const keys = Array.isArray(settings?.purchaseDurations) && settings.purchaseDurations.length ? settings.purchaseDurations : ["2_months", "3_months", "1_year"];
+    res.json({ durations: keys.filter(k => PURCHASE_DURATIONS[k]), defaultDuration: settings?.defaultPurchaseDuration || "1_year" });
+  } catch (error) { res.status(500).json({ error: "Unable to load purchase duration settings." }); }
+});
+
+app.put("/api/admin/purchase-durations", requireAdmin, async (req, res) => {
+  try {
+    const allowed = Array.isArray(req.body.durations) ? req.body.durations.filter(k => PURCHASE_DURATIONS[k]) : [];
+    if (!allowed.length) return res.status(400).json({ error: "Select at least one duration." });
+    const defaultDuration = allowed.includes(req.body.defaultDuration) ? req.body.defaultDuration : allowed[0];
+    const settings = await Settings.findOneAndUpdate({ key: "main" }, { $set: { purchaseDurations: allowed, defaultPurchaseDuration: defaultDuration } }, { upsert: true, new: true, setDefaultsOnInsert: true });
+    res.json({ success: true, durations: settings.purchaseDurations, defaultDuration: settings.defaultPurchaseDuration });
+  } catch (error) { res.status(500).json({ error: "Could not save purchase duration settings." }); }
+});
+
 // ============================================================
 // ADMIN ORDERS
 // ============================================================
@@ -3985,6 +4296,55 @@ app.get(
 );
 
 // ============================================================
+// ADMIN BATCH OWNERSHIP CONTROL
+// ============================================================
+app.get("/api/admin/batch-ownerships", requireAdmin, async (req, res) => {
+  try {
+    await expireOldBatchOwnerships();
+    const rows = await BatchOwnership.find()
+      .populate("appId", "name logo category")
+      .populate("orderId", "customerName customerEmail customerPhone amount paymentGateway status purchaseDuration purchaseDurationLabel createdAt")
+      .sort({ createdAt: -1 }).limit(500).lean();
+    res.json(rows);
+  } catch (error) {
+    console.error("ADMIN OWNERSHIPS ERROR:", error);
+    res.status(500).json({ error: "Unable to load batch ownerships." });
+  }
+});
+
+app.post("/api/admin/batch-ownerships/:id/remove", requireAdmin, async (req, res) => {
+  try {
+    const ownership = await BatchOwnership.findById(req.params.id);
+    if (!ownership) return res.status(404).json({ error: "Batch ownership not found." });
+    ownership.active = false;
+    await ownership.save();
+    await Access.deleteMany({ orderId: ownership.orderId, appId: ownership.appId });
+    res.json({ success: true, message: "Course access removed. Student must pay again to get access." });
+  } catch (error) {
+    console.error("REMOVE BATCH OWNERSHIP ERROR:", error);
+    res.status(500).json({ error: "Could not remove course access." });
+  }
+});
+
+app.post("/api/admin/batch-ownerships/:id/change-duration", requireAdmin, async (req, res) => {
+  try {
+    const key = normalizePurchaseDuration(req.body.purchaseDuration);
+    const ownership = await BatchOwnership.findById(req.params.id);
+    if (!ownership) return res.status(404).json({ error: "Batch ownership not found." });
+    ownership.purchaseDuration = key;
+    ownership.purchaseDurationLabel = PURCHASE_DURATIONS[key].label;
+    ownership.startsAt = ownership.startsAt || ownership.createdAt || new Date();
+    ownership.expiresAt = calculateExpiry(key, ownership.startsAt);
+    ownership.active = true;
+    await ownership.save();
+    res.json({ success: true, expiresAt: ownership.expiresAt, purchaseDuration: key, purchaseDurationLabel: ownership.purchaseDurationLabel });
+  } catch (error) {
+    console.error("CHANGE BATCH DURATION ERROR:", error);
+    res.status(500).json({ error: "Could not change course duration." });
+  }
+});
+
+// ============================================================
 // ADMIN UPI QR PAYMENT VERIFICATION
 // ============================================================
 
@@ -4001,20 +4361,19 @@ app.post("/api/admin/orders/:id/upi-qr/approve", requireAdmin, async (req, res) 
     order.upiVerifiedAt = new Date();
     await order.save();
 
-    await BatchOwnership.findOneAndUpdate(
-      { orderId: order._id },
-      {
-        $set: {
-          appId: order.appId,
-          ownerEmail: normalizeEmail(order.customerEmail),
-          orderId: order._id,
-          active: true
-        }
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    // Keep every payment gateway on the same ownership/duration path.
+    const ownership = await grantBatchOwnership(order);
 
-    return res.json({ success: true, status: "paid", orderId: order._id });
+    return res.json({
+      success: true,
+      status: "paid",
+      orderId: order._id,
+      upiOrderId: order.upiOrderId,
+      ownershipId: ownership?._id || null,
+      ownerEmail: normalizeEmail(order.customerEmail),
+      expiresAt: ownership?.expiresAt || null,
+      purchaseDuration: ownership?.purchaseDuration || order.purchaseDuration
+    });
   } catch (error) {
     console.error("APPROVE UPI QR PAYMENT ERROR:", error);
     return res.status(500).json({ error: "Could not approve QR payment" });

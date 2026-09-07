@@ -14,6 +14,7 @@
 
   <link rel="stylesheet" href="/styles.css">
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script>
 </head>
 
 <body>
@@ -135,13 +136,16 @@
     <div id="donatePanel" class="donate-panel hidden-force">
       <div class="donate-card">
         <h2>❤️ Support STUDY PREMIUM COURSE</h2>
-        <p>Donate any amount securely using Razorpay. Your name and total contribution can appear on the leaderboard.</p>
+        <p>Donate any amount securely using Razorpay or Cashfree. Your name and total contribution can appear on the leaderboard.</p>
         <div class="donate-form-grid">
           <input id="donorName" placeholder="Your name" maxlength="100">
           <input id="donorEmail" type="email" placeholder="Email address">
           <input id="donorAmount" type="number" min="1" step="1" placeholder="Amount (₹)">
         </div>
-        <button class="primary" onclick="startDonationPayment()">💳 Donate Now</button>
+        <div class="donate-form-actions">
+          <button class="primary" onclick="startDonationPayment()">💳 Donate with Razorpay</button>
+          <button class="primary" onclick="startCashfreeDonationPayment()">💚 Donate with Cashfree</button>
+        </div>
       </div>
 
       <div class="donate-card">

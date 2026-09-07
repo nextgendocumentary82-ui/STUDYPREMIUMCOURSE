@@ -330,6 +330,53 @@ function showPanel() {
 }
 
 
+
+async function loadBatchOwnerships() {
+  try {
+    const rows = await api("/api/admin/batch-ownerships");
+    const el = document.getElementById("batchOwnerships");
+    if (!el) return;
+    if (!rows.length) { el.innerHTML = '<p class="loading">No active course ownerships.</p>'; return; }
+    el.innerHTML = rows.map(x => {
+      const o = x.orderId || {};
+      const expires = x.expiresAt ? new Date(x.expiresAt).toLocaleString("en-IN") : "Lifetime";
+      return `<div class="order"><b>${esc(x.appId?.name || "Course")}</b><br>Name: ${esc(o.customerName || "—")} • Email: ${esc(o.customerEmail || x.ownerEmail || "—")} • Mobile: ${esc(o.customerPhone || "—")}<br>Payment: ${esc(o.paymentGateway || "—")} • Amount: ${money(o.amount || 0)} • Duration: <b>${esc(x.purchaseDurationLabel || "1 Year")}</b> • Expires: ${esc(expires)}<br>Status: <b>${x.active ? "ACTIVE" : "REMOVED"}</b><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${x.active ? `<select id="dur_${x._id}"><option value="2_months">2 Months</option><option value="3_months">3 Months</option><option value="1_year">1 Year</option><option value="lifetime">Lifetime</option></select><button class="primary" onclick="changeBatchDuration('${x._id}')">Change Duration</button><button class="secondary" onclick="removeBatchOwnership('${x._id}')">Remove Access</button>` : ""}</div></div>`;
+    }).join("");
+  } catch (e) { const el=document.getElementById("batchOwnerships"); if(el) el.innerHTML=`<p class="loading">${esc(e.message||"Unable to load")}</p>`; }
+}
+
+async function changeBatchDuration(id) {
+  const value = document.getElementById(`dur_${id}`)?.value || "1_year";
+  if (!confirm(`Change this student's access to ${value}?`)) return;
+  try { await api(`/api/admin/batch-ownerships/${encodeURIComponent(id)}/change-duration`, { method:"POST", body:JSON.stringify({ purchaseDuration:value }) }); alert("Course duration updated."); await loadBatchOwnerships(); } catch(e) { alert(e.message || "Could not change duration."); }
+}
+
+async function removeBatchOwnership(id) {
+  if (!confirm("Remove this student's course access? They will have to pay again.")) return;
+  try { await api(`/api/admin/batch-ownerships/${encodeURIComponent(id)}/remove`, { method:"POST" }); alert("Course access removed. Student must pay again."); await loadBatchOwnerships(); } catch(e) { alert(e.message || "Could not remove access."); }
+}
+
+async function loadPurchaseDurationSettings() {
+  try {
+    const d = await api("/api/admin/purchase-durations");
+    const keys = d.durations || [];
+    document.getElementById("duration2Months").checked = keys.includes("2_months");
+    document.getElementById("duration3Months").checked = keys.includes("3_months");
+    document.getElementById("duration1Year").checked = keys.includes("1_year");
+    document.getElementById("defaultPurchaseDuration").value = d.defaultDuration || "1_year";
+  } catch(e) {}
+}
+
+async function savePurchaseDurationSettings() {
+  const durations=[];
+  if(document.getElementById("duration2Months").checked) durations.push("2_months");
+  if(document.getElementById("duration3Months").checked) durations.push("3_months");
+  if(document.getElementById("duration1Year").checked) durations.push("1_year");
+  const def=document.getElementById("defaultPurchaseDuration").value;
+  if(!durations.length){alert("Select at least one duration.");return;}
+  try { await api("/api/admin/purchase-durations",{method:"PUT",body:JSON.stringify({durations,defaultDuration:def})}); alert("Purchase duration settings saved."); } catch(e){alert(e.message||"Could not save duration settings.");}
+}
+
 /* =========================================================
    LOGOUT
 ========================================================= */
@@ -358,7 +405,8 @@ async function refreshAdmin() {
       apps,
       stats,
       orders,
-      donations
+      donations,
+      batchOwnerships
     ] = await Promise.all([
 
       api("/api/admin/apps"),
@@ -367,7 +415,9 @@ async function refreshAdmin() {
 
       api("/api/admin/orders"),
 
-      api("/api/admin/donations")
+      api("/api/admin/donations"),
+
+      api("/api/admin/batch-ownerships")
 
     ]);
 
@@ -392,6 +442,8 @@ async function refreshAdmin() {
 
     renderCustomers(adminOrders);
     renderDonations(Array.isArray(donations) ? donations : []);
+    await loadBatchOwnerships();
+    await loadPurchaseDurationSettings();
     await loadWebsiteSettings();
 
 

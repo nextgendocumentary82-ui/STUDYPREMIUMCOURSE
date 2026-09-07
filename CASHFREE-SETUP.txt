@@ -27,3 +27,10 @@ IMPORTANT:
 - Whitelist your live website domain in the Cashfree dashboard before production checkout.
 - Never put CASHFREE_SECRET_KEY in frontend files or GitHub.
 - Test with CASHFREE_ENV=sandbox first.
+
+
+DONATION CASHFREE
+-----------------
+Cashfree donations use the same Cashfree webhook endpoint as course payments:
+/api/payments/cashfree/webhook
+No second webhook route is required. Set CASHFREE_APP_ID, CASHFREE_SECRET_KEY, CASHFREE_ENV and PUBLIC_URL in Render.

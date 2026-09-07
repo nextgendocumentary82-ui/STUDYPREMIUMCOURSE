@@ -340,7 +340,7 @@ async function loadBatchOwnerships() {
     el.innerHTML = rows.map(x => {
       const o = x.orderId || {};
       const expires = x.expiresAt ? new Date(x.expiresAt).toLocaleString("en-IN") : "Lifetime";
-      return `<div class="order"><b>${esc(x.appId?.name || "Course")}</b><br>Name: ${esc(o.customerName || "—")} • Email: ${esc(o.customerEmail || x.ownerEmail || "—")} • Mobile: ${esc(o.customerPhone || "—")}<br>Payment: ${esc(o.paymentGateway || "—")} • Amount: ${money(o.amount || 0)} • Duration: <b>${esc(x.purchaseDurationLabel || "1 Year")}</b> • Expires: ${esc(expires)}<br>Status: <b>${x.active ? "ACTIVE" : "REMOVED"}</b><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${x.active ? `<select id="dur_${x._id}"><option value="2_months">2 Months</option><option value="3_months">3 Months</option><option value="1_year">1 Year</option><option value="lifetime">Lifetime</option></select><button class="primary" onclick="changeBatchDuration('${x._id}')">Change Duration</button><button class="secondary" onclick="removeBatchOwnership('${x._id}')">Remove Access</button>` : ""}</div></div>`;
+      return `<div class="order"><b>${esc(x.appId?.name || "Course")}</b><br>Name: ${esc(o.customerName || "—")} • Email: ${esc(o.customerEmail || x.ownerEmail || "—")} • Mobile: ${esc(o.customerPhone || "—")}<br>Payment: ${esc(o.paymentGateway || "—")} • Amount: ${money(o.amount || 0)} • Duration: <b>${esc(x.purchaseDurationLabel || "1 Year")}</b> • Expires: ${esc(expires)}<br>Status: <b>${x.active ? "ACTIVE" : "REMOVED"}</b><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${x.active ? `<select id="dur_${x._id}"><option value="7_days">7 Days</option><option value="15_days">15 Days</option><option value="30_days">30 Days</option><option value="2_months">2 Months</option><option value="3_months">3 Months</option><option value="6_months">6 Months</option><option value="1_year">1 Year</option><option value="lifetime">Lifetime</option></select><button class="primary" onclick="changeBatchDuration('${x._id}')">Change Duration</button><button class="secondary" onclick="removeBatchOwnership('${x._id}')">Remove Access</button>` : ""}</div></div>`;
     }).join("");
   } catch (e) { const el=document.getElementById("batchOwnerships"); if(el) el.innerHTML=`<p class="loading">${esc(e.message||"Unable to load")}</p>`; }
 }
@@ -360,8 +360,12 @@ async function loadPurchaseDurationSettings() {
   try {
     const d = await api("/api/admin/purchase-durations");
     const keys = d.durations || [];
+    document.getElementById("duration7Days").checked = keys.includes("7_days");
+    document.getElementById("duration15Days").checked = keys.includes("15_days");
+    document.getElementById("duration30Days").checked = keys.includes("30_days");
     document.getElementById("duration2Months").checked = keys.includes("2_months");
     document.getElementById("duration3Months").checked = keys.includes("3_months");
+    document.getElementById("duration6Months").checked = keys.includes("6_months");
     document.getElementById("duration1Year").checked = keys.includes("1_year");
     document.getElementById("defaultPurchaseDuration").value = d.defaultDuration || "1_year";
   } catch(e) {}
@@ -369,8 +373,12 @@ async function loadPurchaseDurationSettings() {
 
 async function savePurchaseDurationSettings() {
   const durations=[];
+  if(document.getElementById("duration7Days").checked) durations.push("7_days");
+  if(document.getElementById("duration15Days").checked) durations.push("15_days");
+  if(document.getElementById("duration30Days").checked) durations.push("30_days");
   if(document.getElementById("duration2Months").checked) durations.push("2_months");
   if(document.getElementById("duration3Months").checked) durations.push("3_months");
+  if(document.getElementById("duration6Months").checked) durations.push("6_months");
   if(document.getElementById("duration1Year").checked) durations.push("1_year");
   const def=document.getElementById("defaultPurchaseDuration").value;
   if(!durations.length){alert("Select at least one duration.");return;}

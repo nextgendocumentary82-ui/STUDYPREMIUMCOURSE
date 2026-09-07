@@ -478,6 +478,8 @@ function renderDetail(app) {
         🌐 Visit Website
       </button>
 
+      ${price > 0 ? `<button class="secondary" onclick="openPurchasedBatch()">🔐 Already Purchased? Open Batch</button>` : ""}
+
     </div>
 
 
@@ -972,10 +974,10 @@ async function startPayment() {
 ========================================================= */
 
 let activeQrOrderId = "";
-let activeQrStatusTimer = null;
+let activeQrBuyer = { name: "", email: "", phone: "" };
+let upiStatusTimer = null;
 
 async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_year" }) {
-  stopQrStatusPolling();
   const payButton = document.getElementById("payButton");
   if (!phone) {
     toast("Please enter your mobile number.");
@@ -1006,6 +1008,8 @@ async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_yea
     }
 
     activeQrOrderId = order.orderId;
+    activeQrBuyer = { name, email, phone };
+    if (upiStatusTimer) clearInterval(upiStatusTimer);
     const qrImage = document.getElementById("upiQrImage");
     if (qrImage) qrImage.src = order.qrUrl || "/qr-payment.jpeg";
 
@@ -1027,45 +1031,11 @@ async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_yea
   }
 }
 
-function stopQrStatusPolling() {
-  if (activeQrStatusTimer) {
-    clearInterval(activeQrStatusTimer);
-    activeQrStatusTimer = null;
-  }
-}
-
 function closeQrPayment() {
-  stopQrStatusPolling();
   document.getElementById("qrPayModal")?.classList.add("hidden");
   activeQrOrderId = "";
-}
-
-async function pollUpiQrStatus(email, phone) {
-  if (!activeQrOrderId) return;
-  try {
-    const response = await fetch("/api/payments/upi-qr/status", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderId: activeQrOrderId, email, phone })
-    });
-    const result = await response.json();
-    if (!response.ok) return;
-
-    if (result.status === "paid") {
-      stopQrStatusPolling();
-      const text = document.getElementById("qrPayText");
-      if (text) text.textContent = "Payment verified! Course access is active. Login with the same payment email to open it.";
-      const button = document.getElementById("upiSubmitButton");
-      if (button) {
-        button.disabled = false;
-        button.textContent = "Payment Approved — Open Course";
-        button.onclick = () => { window.location.href = "/account.html"; };
-      }
-      toast("Payment approved! Course access is active.");
-    }
-  } catch (error) {
-    console.warn("UPI status check failed:", error);
-  }
+  activeQrBuyer = { name: "", email: "", phone: "" };
+  if (upiStatusTimer) { clearInterval(upiStatusTimer); upiStatusTimer = null; }
 }
 
 async function submitUpiQrPayment() {
@@ -1101,13 +1071,8 @@ async function submitUpiQrPayment() {
     document.getElementById("qrPayText").textContent =
       "Reference submitted. Access will unlock automatically only after the admin verifies the real transaction in the UPI/bank account.";
     if (button) button.textContent = "Verification Pending";
-    toast("Payment reference submitted. We will auto-check admin approval.");
-
-    stopQrStatusPolling();
-    const email = document.getElementById("buyerEmail")?.value?.trim() || "";
-    const phone = document.getElementById("buyerPhone")?.value?.trim() || "";
-    await pollUpiQrStatus(email, phone);
-    activeQrStatusTimer = setInterval(() => pollUpiQrStatus(email, phone), 4000);
+    toast("Payment reference submitted. Admin verification ke baad access automatically open hoga.");
+    startUpiApprovalPolling();
   } catch (error) {
     console.error("UPI QR submit error:", error);
     toast(error.message || "Could not submit payment reference.");
@@ -1121,6 +1086,28 @@ async function submitUpiQrPayment() {
 /* =========================================================
    CASHFREE PAYMENT
 ========================================================= */
+
+function startUpiApprovalPolling() {
+  if (upiStatusTimer) clearInterval(upiStatusTimer);
+  let tries = 0;
+  upiStatusTimer = setInterval(async () => {
+    tries++;
+    if (!activeQrOrderId || tries > 180) { clearInterval(upiStatusTimer); upiStatusTimer = null; return; }
+    try {
+      const r = await fetch("/api/payments/upi-qr/status", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ orderId:activeQrOrderId, email:activeQrBuyer.email, phone:activeQrBuyer.phone }) });
+      const d = await r.json();
+      if (!r.ok) return;
+      if (d.status === "paid" && d.accessActive) {
+        clearInterval(upiStatusTimer); upiStatusTimer = null;
+        document.getElementById("qrPayText").textContent = `Payment approved. ${d.purchaseDurationLabel || "Course access"} active. Opening batch...`;
+        const open = await fetch("/api/purchase/open", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ appId:currentApp._id, ...activeQrBuyer }) });
+        const od = await open.json();
+        if (!open.ok || !od.success) throw new Error(od.error || "Could not open purchased batch.");
+        location.href = od.url;
+      }
+    } catch (e) { console.warn("UPI approval polling", e); }
+  }, 4000);
+}
 
 async function startCashfreePayment({ name, email, phone, purchaseDuration = "1_year" }) {
   const payButton = document.getElementById("payButton");

@@ -1252,7 +1252,7 @@ const orderSchema =
 
       purchaseDuration: {
         type: String,
-        enum: ["2_months", "3_months", "1_year", "lifetime"],
+        enum: ["7_days", "15_days", "30_days", "2_months", "3_months", "6_months", "1_year", "lifetime"],
         default: "1_year"
       },
 
@@ -1410,7 +1410,7 @@ const batchOwnershipSchema = new mongoose.Schema({
   ownerEmail: { type: String, required: true, lowercase: true, trim: true, index: true },
   orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
   active: { type: Boolean, default: true },
-  purchaseDuration: { type: String, enum: ["2_months", "3_months", "1_year", "lifetime"], default: "1_year" },
+  purchaseDuration: { type: String, enum: ["7_days", "15_days", "30_days", "2_months", "3_months", "6_months", "1_year", "lifetime"], default: "1_year" },
   purchaseDurationLabel: { type: String, default: "1 Year" },
   startsAt: { type: Date, default: Date.now },
   expiresAt: { type: Date, default: null, index: true },
@@ -1969,10 +1969,14 @@ app.get("/api/auth/me", requireUser, (req, res) => {
 // BATCH PURCHASE DURATION + OWNERSHIP HELPERS
 // ============================================================
 const PURCHASE_DURATIONS = {
-  "2_months": { label: "2 Months", months: 2 },
-  "3_months": { label: "3 Months", months: 3 },
-  "1_year": { label: "1 Year", months: 12 },
-  "lifetime": { label: "Lifetime", months: null }
+  "7_days": { label: "7 Days", days: 7, months: null },
+  "15_days": { label: "15 Days", days: 15, months: null },
+  "30_days": { label: "30 Days", days: 30, months: null },
+  "2_months": { label: "2 Months", days: null, months: 2 },
+  "3_months": { label: "3 Months", days: null, months: 3 },
+  "6_months": { label: "6 Months", days: null, months: 6 },
+  "1_year": { label: "1 Year", days: null, months: 12 },
+  "lifetime": { label: "Lifetime", days: null, months: null }
 };
 
 function normalizePurchaseDuration(value) {
@@ -1982,9 +1986,10 @@ function normalizePurchaseDuration(value) {
 
 function calculateExpiry(durationKey, fromDate = new Date()) {
   const duration = PURCHASE_DURATIONS[normalizePurchaseDuration(durationKey)];
-  if (!duration || duration.months === null) return null;
+  if (!duration || (duration.months === null && duration.days === null)) return null;
   const d = new Date(fromDate);
-  d.setMonth(d.getMonth() + duration.months);
+  if (duration.days !== null) d.setDate(d.getDate() + duration.days);
+  else d.setMonth(d.getMonth() + duration.months);
   return d;
 }
 
@@ -2583,7 +2588,7 @@ app.get("/api/purchase-durations", async (req, res) => {
     const defaultKey = keys.includes(settings?.defaultPurchaseDuration) ? settings.defaultPurchaseDuration : keys[0] || "1_year";
     res.json({ durations: keys.map(key => ({ key, label: PURCHASE_DURATIONS[key].label })), defaultDuration: defaultKey });
   } catch (error) {
-    res.json({ durations: ["2_months", "3_months", "1_year"].map(key => ({ key, label: PURCHASE_DURATIONS[key].label })), defaultDuration: "1_year" });
+    res.json({ durations: ["7_days", "15_days", "30_days", "2_months", "3_months", "6_months", "1_year"].map(key => ({ key, label: PURCHASE_DURATIONS[key].label })), defaultDuration: "1_year" });
   }
 });
 
@@ -2978,7 +2983,10 @@ app.post("/api/payments/upi-qr/submit", async (req, res) => {
     const order = await Order.findOne({ upiOrderId });
     if (!order) return res.status(404).json({ error: "QR order not found" });
     if (order.paymentGateway !== "upi_qr") return res.status(400).json({ error: "Invalid payment method" });
-    if (order.status === "paid") return res.json({ success: true, status: "paid" });
+    if (order.status === "paid") {
+      const ownership = await grantBatchOwnership(order);
+      return res.json({ success: true, status: "paid", purchaseDurationLabel: ownership?.purchaseDurationLabel, expiresAt: ownership?.expiresAt || null });
+    }
     if (order.status === "failed") return res.status(400).json({ error: "This payment request is closed" });
 
     order.upiReference = reference;
@@ -2996,53 +3004,6 @@ app.post("/api/payments/upi-qr/submit", async (req, res) => {
     return res.status(500).json({ error: "Could not submit payment reference" });
   }
 });
-
-// ============================================================
-// UPI QR PAYMENT STATUS / AUTO ACCESS SYNC
-// ============================================================
-app.post("/api/payments/upi-qr/status", async (req, res) => {
-  try {
-    const upiOrderId = String(req.body.orderId || "").trim();
-    const email = normalizeEmail(req.body.email || "");
-    const phone = String(req.body.phone || "").replace(/\D/g, "");
-
-    if (!upiOrderId || !email || !phone) {
-      return res.status(400).json({ error: "Order ID, email and phone are required." });
-    }
-
-    const order = await Order.findOne({ upiOrderId });
-    if (!order) return res.status(404).json({ error: "QR order not found." });
-
-    const orderEmail = normalizeEmail(order.customerEmail);
-    const orderPhone = String(order.customerPhone || "").replace(/\D/g, "");
-    if (orderEmail !== email || orderPhone !== phone) {
-      return res.status(403).json({ error: "Payment details do not match this order." });
-    }
-
-    if (order.status === "paid") {
-      const ownership = await grantBatchOwnership(order);
-      return res.json({
-        success: true,
-        status: "paid",
-        orderId: order._id,
-        ownershipId: ownership?._id || null,
-        ownerEmail: orderEmail,
-        expiresAt: ownership?.expiresAt || null,
-        purchaseDuration: ownership?.purchaseDuration || order.purchaseDuration
-      });
-    }
-
-    return res.json({
-      success: true,
-      status: order.status,
-      pending: ["created", "pending_verification"].includes(order.status)
-    });
-  } catch (error) {
-    console.error("UPI QR STATUS ERROR:", error);
-    return res.status(500).json({ error: "Could not check payment status." });
-  }
-});
-
 
 // ============================================================
 // PAYMENT VERIFY
@@ -3185,6 +3146,41 @@ app.post(
 );
 
 // ============================================================
+// OPEN PURCHASE USING THE SAME BUYER DETAILS
+// ============================================================
+app.post("/api/purchase/open", async (req, res) => {
+  try {
+    const { appId, name = "", email = "", phone = "" } = req.body || {};
+    const cleanEmail = normalizeEmail(email);
+    const cleanPhone = String(phone || "").replace(/\D/g, "");
+    const cleanName = String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!appId || !cleanEmail || !cleanPhone || !cleanName) {
+      return res.status(400).json({ error: "Enter the same name, email and mobile number used for payment." });
+    }
+    await expireOldBatchOwnerships();
+    const candidates = await Order.find({ appId, status: "paid", customerEmail: cleanEmail }).sort({ createdAt: -1 }).limit(50);
+    const order = candidates.find(o => {
+      const savedPhone = String(o.customerPhone || "").replace(/\D/g, "");
+      const savedName = String(o.customerName || "").trim().toLowerCase().replace(/\s+/g, " ");
+      return savedPhone === cleanPhone && savedName === cleanName;
+    });
+    if (!order) return res.status(403).json({ error: "No verified purchase found with these details." });
+    const ownership = await BatchOwnership.findOne({ orderId: order._id, active: true });
+    if (!ownership) return res.status(403).json({ error: "This purchase is not active. Please contact admin." });
+    const item = await AppModel.findById(appId).lean();
+    if (!item) return res.status(404).json({ error: "Batch not found." });
+    const token = createAccessToken();
+    const type = item.websiteUrl ? "website" : "app";
+    const expiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+    await Access.create({ tokenHash: hashAccessToken(token), orderId: order._id, appId: item._id, type, expiresAt });
+    res.json({ success: true, url: type === "website" ? `/api/access/website?token=${encodeURIComponent(token)}` : `/api/access/download?token=${encodeURIComponent(token)}`, purchaseDurationLabel: ownership.purchaseDurationLabel, expiresAt });
+  } catch (error) {
+    console.error("OPEN PURCHASE ERROR:", error);
+    res.status(500).json({ error: "Could not open purchased batch." });
+  }
+});
+
+// ============================================================
 // CREATE ACCESS TOKEN
 // ============================================================
 
@@ -3223,13 +3219,14 @@ app.post(
         });
       }
 
-      const token =
-        createAccessToken();
+      await expireOldBatchOwnerships();
+      const ownership = await BatchOwnership.findOne({ orderId: order._id, active: true });
+      if (!ownership) {
+        return res.status(403).json({ error: "Course access is not active for this purchase." });
+      }
 
-      const tokenHash =
-        hashAccessToken(
-          token
-        );
+      const token = createAccessToken();
+      const tokenHash = hashAccessToken(token);
 
       const item =
         await AppModel.findById(
@@ -3243,15 +3240,7 @@ app.post(
         });
       }
 
-      const expiresAt =
-        new Date(
-          Date.now() +
-          3650 *
-          24 *
-          60 *
-          60 *
-          1000
-        );
+      const expiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
 
       await Access.create({
         tokenHash,
@@ -4345,6 +4334,29 @@ app.post("/api/admin/batch-ownerships/:id/change-duration", requireAdmin, async 
 });
 
 // ============================================================
+// UPI QR PAYMENT STATUS FOR BUYER
+// ============================================================
+app.post("/api/payments/upi-qr/status", async (req, res) => {
+  try {
+    const upiOrderId = String(req.body.orderId || "").trim();
+    const email = normalizeEmail(req.body.email);
+    const phone = String(req.body.phone || "").replace(/\D/g, "");
+    if (!upiOrderId || !email || !phone) return res.status(400).json({ error: "Order and buyer details are required." });
+    const order = await Order.findOne({ upiOrderId });
+    if (!order) return res.status(404).json({ error: "QR order not found." });
+    if (normalizeEmail(order.customerEmail) !== email || String(order.customerPhone || "").replace(/\D/g, "") !== phone) {
+      return res.status(403).json({ error: "Buyer details do not match this payment." });
+    }
+    await expireOldBatchOwnerships();
+    const ownership = await BatchOwnership.findOne({ orderId: order._id, active: true });
+    return res.json({ success: true, status: order.status, accessActive: !!ownership, purchaseDurationLabel: ownership?.purchaseDurationLabel || order.purchaseDurationLabel, expiresAt: ownership?.expiresAt || null });
+  } catch (error) {
+    console.error("UPI STATUS ERROR:", error);
+    res.status(500).json({ error: "Could not check payment status." });
+  }
+});
+
+// ============================================================
 // ADMIN UPI QR PAYMENT VERIFICATION
 // ============================================================
 
@@ -4361,18 +4373,16 @@ app.post("/api/admin/orders/:id/upi-qr/approve", requireAdmin, async (req, res) 
     order.upiVerifiedAt = new Date();
     await order.save();
 
-    // Keep every payment gateway on the same ownership/duration path.
     const ownership = await grantBatchOwnership(order);
 
     return res.json({
       success: true,
       status: "paid",
       orderId: order._id,
-      upiOrderId: order.upiOrderId,
-      ownershipId: ownership?._id || null,
-      ownerEmail: normalizeEmail(order.customerEmail),
-      expiresAt: ownership?.expiresAt || null,
-      purchaseDuration: ownership?.purchaseDuration || order.purchaseDuration
+      ownerEmail: order.customerEmail,
+      purchaseDuration: ownership?.purchaseDuration,
+      purchaseDurationLabel: ownership?.purchaseDurationLabel,
+      expiresAt: ownership?.expiresAt || null
     });
   } catch (error) {
     console.error("APPROVE UPI QR PAYMENT ERROR:", error);

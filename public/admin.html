@@ -124,6 +124,28 @@
          APP MANAGEMENT
     ==================================================== -->
 
+
+    <!-- ===================================================
+         LIVE WEBSITE ANALYTICS
+    ==================================================== -->
+    <section class="panel live-admin-panel">
+      <div class="section-title">
+        <h2>📊 Live Website Analytics</h2>
+        <span id="analyticsUpdated">Updating...</span>
+      </div>
+      <div class="stats analytics-stats">
+        <div class="stat"><small>🟢 Live Users</small><b id="liveUsersStat">0</b></div>
+        <div class="stat"><small>👥 Total Visitors</small><b id="totalVisitorsStat">0</b></div>
+        <div class="stat"><small>📅 Today</small><b id="todayVisitorsStat">0</b></div>
+      </div>
+      <div style="overflow:auto;margin-top:14px">
+        <table class="admin-table" style="width:100%">
+          <thead><tr><th>Status</th><th>Visitor</th><th>Page</th><th>Last Seen</th></tr></thead>
+          <tbody id="liveVisitorRows"><tr><td colspan="4">Loading live visitors...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
     <div class="admin-grid">
 
 

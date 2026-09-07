@@ -81,15 +81,22 @@
       <input id="buyerPhone" type="tel" placeholder="Mobile number" autocomplete="tel" maxlength="15">
 
 
+      <select id="paymentGateway" aria-label="Payment method">
+        <option value="cashfree">Cashfree - UPI / Cards / Net Banking</option>
+        <option value="upi_qr">UPI QR - Scan & Pay</option>
+        <option value="razorpay">Razorpay - UPI / Cards / Net Banking</option>
+      </select>
+
+
       <button id="payButton" class="primary" onclick="startPayment()">
         Pay & Continue
       </button>
 
 
       <small>
-        Secure payment powered by Razorpay.
-        Access is unlocked only after server-side
-        payment verification.
+        Cashfree/Razorpay payments are verified on the server.
+        QR payments require admin verification of the actual UPI transaction;
+        screenshots or fake UTRs never unlock access.
       </small>
 
     </div>
@@ -97,9 +104,33 @@
   </div>
 
 
-  <!-- ================= RAZORPAY ================= -->
+
+
+  <!-- ================= UPI QR PAYMENT MODAL ================= -->
+
+  <div id="qrPayModal" class="modal hidden">
+    <div class="modal-card qr-payment-card">
+      <button class="close" onclick="closeQrPayment()" aria-label="Close">×</button>
+      <h2>Pay via UPI QR</h2>
+      <p id="qrPayText">Scan the QR and pay the exact amount.</p>
+      <div class="qr-image-wrap">
+        <img id="upiQrImage" src="/qr-payment.jpeg" alt="UPI payment QR code">
+      </div>
+      <p class="qr-security-note">
+        ⚠️ Do not close this page until payment is complete.
+        Access is unlocked only after the transaction is manually verified.
+      </p>
+      <input id="upiReference" type="text" placeholder="Enter UPI transaction/reference ID" autocomplete="off" maxlength="64">
+      <button id="upiSubmitButton" class="primary" onclick="submitUpiQrPayment()">I Have Paid — Submit Reference</button>
+      <small>Never enter your UPI PIN here. We only need the transaction/reference ID.</small>
+    </div>
+  </div>
+
+
+  <!-- ================= PAYMENT GATEWAYS ================= -->
 
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script>
 
 
   <!-- ================= APP SCRIPT ================= -->

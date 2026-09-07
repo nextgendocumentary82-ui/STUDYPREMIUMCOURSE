@@ -21,6 +21,12 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
+      - key: CASHFREE_APP_ID
+        sync: false
+      - key: CASHFREE_SECRET_KEY
+        sync: false
+      - key: CASHFREE_ENV
+        value: sandbox
       - key: PUBLIC_URL
         sync: false
       - key: ADMIN_USERNAME

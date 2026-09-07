@@ -10,10 +10,11 @@
     "seed": "node scripts/seed.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "body-parser": "^2.2.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",

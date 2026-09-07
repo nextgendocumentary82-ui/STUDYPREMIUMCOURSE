@@ -158,6 +158,94 @@ app.post(
   }
 );
 
+
+// ============================================================
+// CASHFREE WEBHOOK
+// MUST be registered before express.json() because Cashfree signs
+// the exact raw request body.
+// ============================================================
+
+app.post(
+  "/api/payments/cashfree/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const secret = process.env.CASHFREE_SECRET_KEY;
+      const signature = String(req.headers["x-webhook-signature"] || "");
+      const timestamp = String(req.headers["x-webhook-timestamp"] || "");
+
+      if (!secret) {
+        console.error("CASHFREE_SECRET_KEY is missing.");
+        return res.status(500).json({ error: "Cashfree is not configured." });
+      }
+
+      if (!signature || !timestamp) {
+        return res.status(400).json({ error: "Missing Cashfree webhook headers." });
+      }
+
+      const rawBody = req.body.toString("utf8");
+      const expected = crypto
+        .createHmac("sha256", secret)
+        .update(timestamp + rawBody)
+        .digest("base64");
+
+      const a = Buffer.from(expected, "utf8");
+      const b = Buffer.from(signature, "utf8");
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.status(400).json({ error: "Invalid Cashfree webhook signature." });
+      }
+
+      const event = JSON.parse(rawBody);
+      const type = String(event?.type || "");
+      const cashfreeOrderId = String(event?.data?.order?.order_id || "");
+      const cashfreePaymentId = String(event?.data?.payment?.cf_payment_id || "");
+      const paymentStatus = String(event?.data?.payment?.payment_status || "").toUpperCase();
+
+      if (!cashfreeOrderId) {
+        return res.json({ received: true });
+      }
+
+      const order = await Order.findOne({ cashfreeOrderId });
+      if (!order) {
+        return res.json({ received: true });
+      }
+
+      if (type === "PAYMENT_SUCCESS_WEBHOOK" && paymentStatus === "SUCCESS") {
+        order.cashfreePaymentId = cashfreePaymentId;
+        order.status = "paid";
+        await order.save();
+
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          {
+            $set: {
+              appId: order.appId,
+              ownerEmail: normalizeEmail(order.customerEmail),
+              orderId: order._id,
+              active: true
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      }
+
+      if (
+        (type === "PAYMENT_FAILED_WEBHOOK" || type === "PAYMENT_USER_DROPPED_WEBHOOK") &&
+        order.status !== "paid"
+      ) {
+        order.cashfreePaymentId = cashfreePaymentId;
+        order.status = "failed";
+        await order.save();
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("CASHFREE WEBHOOK ERROR:", error);
+      return res.status(500).json({ error: "Cashfree webhook processing failed." });
+    }
+  }
+);
+
 app.use(
   express.json({
     limit: "2mb"
@@ -1050,6 +1138,49 @@ const appSchema =
 const orderSchema =
   new mongoose.Schema(
     {
+      paymentGateway: {
+        type: String,
+        enum: ["razorpay", "cashfree", "upi_qr"],
+        default: "razorpay"
+      },
+
+      cashfreeOrderId: {
+        type: String,
+        unique: true,
+        sparse: true
+      },
+
+      cashfreeCfOrderId: {
+        type: String,
+        default: ""
+      },
+
+      cashfreePaymentId: {
+        type: String,
+        default: ""
+      },
+
+      upiOrderId: {
+        type: String,
+        unique: true,
+        sparse: true
+      },
+
+      upiReference: {
+        type: String,
+        default: ""
+      },
+
+      upiSubmittedAt: {
+        type: Date,
+        default: null
+      },
+
+      upiVerifiedAt: {
+        type: Date,
+        default: null
+      },
+
       razorpayOrderId: {
         type: String,
         unique: true,
@@ -1087,6 +1218,7 @@ const orderSchema =
         type: String,
         enum: [
           "created",
+          "pending_verification",
           "paid",
           "failed"
         ],
@@ -1214,6 +1346,28 @@ const settingsSchema =
 // USER + BATCH OWNERSHIP + DONATION
 // ============================================================
 
+
+// ============================================================
+// LIVE VISITOR ANALYTICS
+// Unique visitors are stored in MongoDB; "live" means heartbeat
+// seen within the last 45 seconds. No payment/user credentials stored.
+// ============================================================
+const visitorSchema = new mongoose.Schema({
+  visitorId: { type: String, required: true, unique: true, index: true },
+  firstSeen: { type: Date, default: Date.now, index: true },
+  lastSeen: { type: Date, default: Date.now, index: true },
+  page: { type: String, default: "/" },
+  userAgent: { type: String, default: "" },
+  ipHash: { type: String, default: "" }
+}, { timestamps: true });
+
+const Visitor = mongoose.model("Visitor", visitorSchema);
+
+function visitorIpHash(req) {
+  const raw = String(req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+  return raw ? crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24) : "";
+}
+
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 80 },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -1314,6 +1468,74 @@ function getRazorpay() {
   }
 
   return razorpay;
+}
+
+
+// ============================================================
+// CASHFREE
+// ============================================================
+
+function getCashfreeConfig() {
+  const appId = String(process.env.CASHFREE_APP_ID || "").trim();
+  const secretKey = String(process.env.CASHFREE_SECRET_KEY || "").trim();
+  const environment = String(process.env.CASHFREE_ENV || "production").toLowerCase() === "sandbox"
+    ? "sandbox"
+    : "production";
+
+  if (!appId || !secretKey) return null;
+
+  return {
+    appId,
+    secretKey,
+    environment,
+    apiVersion: "2025-01-01",
+    baseUrl: environment === "sandbox"
+      ? "https://sandbox.cashfree.com/pg"
+      : "https://api.cashfree.com/pg"
+  };
+}
+
+async function cashfreeRequest(pathname, options = {}) {
+  const cf = getCashfreeConfig();
+  if (!cf) {
+    const error = new Error("Cashfree is not configured on the server.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const response = await fetch(`${cf.baseUrl}${pathname}`, {
+    method: options.method || "GET",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-api-version": cf.apiVersion,
+      "x-client-id": cf.appId,
+      "x-client-secret": cf.secretKey,
+      ...(options.headers || {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+
+  if (!response.ok) {
+    const message =
+      data?.message ||
+      data?.type ||
+      data?.code ||
+      `Cashfree request failed (${response.status})`;
+    const error = new Error(String(message));
+    error.statusCode = response.status;
+    error.details = data;
+    throw error;
+  }
+
+  return data;
 }
 
 // ============================================================
@@ -2200,6 +2422,9 @@ app.post(
         });
 
       await Order.create({
+        paymentGateway:
+          "razorpay",
+
         razorpayOrderId:
           razorpayOrder.id,
 
@@ -2268,6 +2493,255 @@ app.post(
     }
   }
 );
+
+
+// ============================================================
+// CASHFREE PAYMENT ORDER
+// ============================================================
+
+app.post(
+  "/api/payments/cashfree/order",
+  async (req, res) => {
+    try {
+      const {
+        appId,
+        customerName = "",
+        customerEmail = "",
+        customerPhone = ""
+      } = req.body;
+
+      if (!appId) return res.status(400).json({ error: "App ID is required" });
+      if (!String(customerName).trim()) return res.status(400).json({ error: "Customer name is required" });
+      if (!String(customerEmail).trim()) return res.status(400).json({ error: "Customer email is required" });
+      if (!String(customerPhone).trim()) return res.status(400).json({ error: "Customer phone is required for Cashfree" });
+
+      const cf = getCashfreeConfig();
+      if (!cf) {
+        return res.status(503).json({ error: "Cashfree is not configured on the server." });
+      }
+
+      const item = await AppModel.findOne({ _id: appId, published: true });
+      if (!item) return res.status(404).json({ error: "App not found" });
+      if (item.accessType !== "paid" || item.price <= 0) {
+        return res.status(400).json({ error: "This item is free" });
+      }
+
+      const localOrderId = `spc_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
+      const publicUrl = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
+
+      const orderBody = {
+        order_id: localOrderId,
+        order_amount: Number(item.price.toFixed(2)),
+        order_currency: "INR",
+        customer_details: {
+          customer_id: `cust_${crypto.createHash("sha256").update(String(customerEmail).toLowerCase()).digest("hex").slice(0, 20)}`,
+          customer_name: String(customerName).trim().slice(0, 100),
+          customer_email: String(customerEmail).trim().toLowerCase(),
+          customer_phone: String(customerPhone).replace(/\D/g, "").slice(-10)
+        },
+        order_note: String(item.name || "STUDY PREMIUM COURSE").slice(0, 180),
+        order_tags: {
+          app_id: String(item._id)
+        }
+      };
+
+      if (publicUrl) {
+        orderBody.order_meta = {
+          return_url: `${publicUrl}/app.html?id=${encodeURIComponent(String(item._id))}&cashfree_order_id={order_id}`,
+          notify_url: `${publicUrl}/api/payments/cashfree/webhook`
+        };
+      }
+
+      const cashfreeOrder = await cashfreeRequest("/orders", {
+        method: "POST",
+        headers: { "x-idempotency-key": localOrderId },
+        body: orderBody
+      });
+
+      const dbOrder = await Order.create({
+        paymentGateway: "cashfree",
+        cashfreeOrderId: localOrderId,
+        cashfreeCfOrderId: String(cashfreeOrder.cf_order_id || ""),
+        appId: item._id,
+        appName: item.name,
+        amount: item.price,
+        currency: "INR",
+        status: "created",
+        customerName: String(customerName).trim(),
+        customerEmail: String(customerEmail).trim().toLowerCase(),
+        customerPhone: String(customerPhone).trim()
+      });
+
+      return res.json({
+        success: true,
+        gateway: "cashfree",
+        orderId: localOrderId,
+        dbOrderId: dbOrder._id,
+        paymentSessionId: cashfreeOrder.payment_session_id,
+        mode: cf.environment,
+        amount: item.price,
+        currency: "INR"
+      });
+    } catch (error) {
+      console.error("CREATE CASHFREE ORDER ERROR:", error?.details || error);
+      return res.status(error.statusCode || 500).json({
+        error: error.message || "Could not create Cashfree payment order"
+      });
+    }
+  }
+);
+
+// ============================================================
+// CASHFREE PAYMENT VERIFY / STATUS
+// ============================================================
+
+app.post(
+  "/api/payments/cashfree/verify",
+  async (req, res) => {
+    try {
+      const cashfreeOrderId = String(req.body.orderId || "").trim();
+      if (!cashfreeOrderId) {
+        return res.status(400).json({ error: "Cashfree order ID is required." });
+      }
+
+      const order = await Order.findOne({ cashfreeOrderId });
+      if (!order) return res.status(404).json({ error: "Order not found." });
+
+      const cashfreeOrder = await cashfreeRequest(`/orders/${encodeURIComponent(cashfreeOrderId)}`);
+      const status = String(cashfreeOrder.order_status || "").toUpperCase();
+
+      // Never trust the browser callback alone. Access is granted only
+      // after Cashfree's server reports the order as PAID.
+      if (status === "PAID") {
+        order.status = "paid";
+        order.cashfreeCfOrderId = String(cashfreeOrder.cf_order_id || order.cashfreeCfOrderId || "");
+        await order.save();
+
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          {
+            $set: {
+              appId: order.appId,
+              ownerEmail: normalizeEmail(order.customerEmail),
+              orderId: order._id,
+              active: true
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        return res.json({
+          success: true,
+          status: "paid",
+          orderId: order._id,
+          cashfreeOrderId
+        });
+      }
+
+      if (["EXPIRED", "TERMINATED"].includes(status) && order.status !== "paid") {
+        order.status = "failed";
+        await order.save();
+      }
+
+      return res.status(202).json({
+        success: false,
+        pending: status === "ACTIVE",
+        status: status || "ACTIVE",
+        error: status === "ACTIVE"
+          ? "Payment is not confirmed yet. Please complete the payment or wait for confirmation."
+          : `Cashfree payment status: ${status || "UNKNOWN"}`
+      });
+    } catch (error) {
+      console.error("VERIFY CASHFREE PAYMENT ERROR:", error?.details || error);
+      return res.status(error.statusCode || 500).json({
+        error: error.message || "Cashfree payment verification failed"
+      });
+    }
+  }
+);
+
+// ============================================================
+// UPI QR PAYMENT - MANUAL VERIFICATION
+// Static UPI QR payments cannot be automatically verified by Cashfree.
+// The server NEVER grants access from a screenshot/UTR alone.
+// An admin must verify the transaction in the UPI/bank account first.
+// ============================================================
+
+app.post("/api/payments/upi-qr/order", async (req, res) => {
+  try {
+    const { appId, customerName = "", customerEmail = "", customerPhone = "" } = req.body;
+
+    if (!appId) return res.status(400).json({ error: "App ID is required" });
+    if (!String(customerName).trim()) return res.status(400).json({ error: "Customer name is required" });
+    if (!String(customerEmail).trim()) return res.status(400).json({ error: "Customer email is required" });
+    if (!String(customerPhone).trim()) return res.status(400).json({ error: "Mobile number is required" });
+
+    const item = await AppModel.findOne({ _id: appId, published: true });
+    if (!item) return res.status(404).json({ error: "App not found" });
+    if (item.accessType !== "paid" || Number(item.price) <= 0) {
+      return res.status(400).json({ error: "This item is free" });
+    }
+
+    const upiOrderId = `upi_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
+    const order = await Order.create({
+      paymentGateway: "upi_qr",
+      upiOrderId,
+      appId: item._id,
+      appName: item.name,
+      amount: item.price,
+      currency: "INR",
+      status: "created",
+      customerName: String(customerName).trim().slice(0, 100),
+      customerEmail: String(customerEmail).trim().toLowerCase(),
+      customerPhone: String(customerPhone).trim().slice(0, 15)
+    });
+
+    return res.json({
+      success: true,
+      orderId: upiOrderId,
+      dbOrderId: order._id,
+      amount: item.price,
+      currency: "INR",
+      qrUrl: "/qr-payment.jpeg",
+      message: "Scan the QR and pay the exact amount. Access will be unlocked only after admin verifies the transaction."
+    });
+  } catch (error) {
+    console.error("CREATE UPI QR ORDER ERROR:", error);
+    return res.status(500).json({ error: "Could not create QR payment order" });
+  }
+});
+
+app.post("/api/payments/upi-qr/submit", async (req, res) => {
+  try {
+    const upiOrderId = String(req.body.orderId || "").trim();
+    const reference = String(req.body.reference || "").trim();
+
+    if (!upiOrderId) return res.status(400).json({ error: "QR order ID is required" });
+    if (!/^[A-Za-z0-9._-]{6,64}$/.test(reference)) {
+      return res.status(400).json({ error: "Enter a valid UPI transaction/reference ID" });
+    }
+
+    const order = await Order.findOne({ upiOrderId });
+    if (!order) return res.status(404).json({ error: "QR order not found" });
+    if (order.paymentGateway !== "upi_qr") return res.status(400).json({ error: "Invalid payment method" });
+    if (order.status === "paid") return res.json({ success: true, status: "paid" });
+    if (order.status === "failed") return res.status(400).json({ error: "This payment request is closed" });
+
+    order.upiReference = reference;
+    order.upiSubmittedAt = new Date();
+    order.status = "pending_verification";
+    await order.save();
+
+    return res.json({
+      success: true,
+      status: "pending_verification",
+      message: "Payment proof submitted. Access will unlock only after the admin verifies the actual transaction."
+    });
+  } catch (error) {
+    console.error("SUBMIT UPI QR PAYMENT ERROR:", error);
+    return res.status(500).json({ error: "Could not submit payment reference" });
+  }
+});
 
 // ============================================================
 // PAYMENT VERIFY
@@ -3511,6 +3985,137 @@ app.get(
 );
 
 // ============================================================
+// ADMIN UPI QR PAYMENT VERIFICATION
+// ============================================================
+
+app.post("/api/admin/orders/:id/upi-qr/approve", requireAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.paymentGateway !== "upi_qr") return res.status(400).json({ error: "This is not a QR payment" });
+    if (!order.upiReference) return res.status(400).json({ error: "No UPI transaction reference submitted" });
+    if (order.status === "paid") return res.json({ success: true, status: "paid" });
+
+    // Admin should approve only after confirming the same amount/reference in the bank/UPI app.
+    order.status = "paid";
+    order.upiVerifiedAt = new Date();
+    await order.save();
+
+    await BatchOwnership.findOneAndUpdate(
+      { orderId: order._id },
+      {
+        $set: {
+          appId: order.appId,
+          ownerEmail: normalizeEmail(order.customerEmail),
+          orderId: order._id,
+          active: true
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    return res.json({ success: true, status: "paid", orderId: order._id });
+  } catch (error) {
+    console.error("APPROVE UPI QR PAYMENT ERROR:", error);
+    return res.status(500).json({ error: "Could not approve QR payment" });
+  }
+});
+
+app.post("/api/admin/orders/:id/upi-qr/reject", requireAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.paymentGateway !== "upi_qr") return res.status(400).json({ error: "This is not a QR payment" });
+    if (order.status === "paid") return res.status(400).json({ error: "Paid orders cannot be rejected" });
+
+    order.status = "failed";
+    await order.save();
+    return res.json({ success: true, status: "failed" });
+  } catch (error) {
+    console.error("REJECT UPI QR PAYMENT ERROR:", error);
+    return res.status(500).json({ error: "Could not reject QR payment" });
+  }
+});
+
+
+// ============================================================
+// PUBLIC LIVE VISITOR HEARTBEAT
+// ============================================================
+app.post("/api/analytics/heartbeat", async (req, res) => {
+  try {
+    const visitorId = String(req.body?.visitorId || "").trim().slice(0, 100);
+    const page = String(req.body?.page || "/").trim().slice(0, 200) || "/";
+    if (!visitorId) return res.status(400).json({ error: "visitorId is required" });
+
+    const now = new Date();
+    await Visitor.findOneAndUpdate(
+      { visitorId },
+      {
+        $set: {
+          lastSeen: now,
+          page,
+          userAgent: String(req.headers["user-agent"] || "").slice(0, 300),
+          ipHash: visitorIpHash(req)
+        },
+        $setOnInsert: { firstSeen: now }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const liveSince = new Date(Date.now() - 45 * 1000);
+    const [liveUsers, totalVisitors, todayVisitors] = await Promise.all([
+      Visitor.countDocuments({ lastSeen: { $gte: liveSince } }),
+      Visitor.countDocuments(),
+      Visitor.countDocuments({
+        firstSeen: {
+          $gte: new Date(new Date().setHours(0, 0, 0, 0))
+        }
+      })
+    ]);
+
+    res.json({ liveUsers, totalVisitors, todayVisitors });
+  } catch (error) {
+    console.error("ANALYTICS HEARTBEAT ERROR:", error);
+    res.status(500).json({ error: "Analytics unavailable" });
+  }
+});
+
+app.get("/api/analytics/live", async (req, res) => {
+  try {
+    const liveSince = new Date(Date.now() - 45 * 1000);
+    const [liveUsers, totalVisitors, todayVisitors] = await Promise.all([
+      Visitor.countDocuments({ lastSeen: { $gte: liveSince } }),
+      Visitor.countDocuments(),
+      Visitor.countDocuments({ firstSeen: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) } })
+    ]);
+    res.json({ liveUsers, totalVisitors, todayVisitors });
+  } catch {
+    res.status(500).json({ error: "Analytics unavailable" });
+  }
+});
+
+app.get("/api/admin/analytics", requireAdmin, async (req, res) => {
+  try {
+    const liveSince = new Date(Date.now() - 45 * 1000);
+    const todayStart = new Date(new Date().setHours(0, 0, 0, 0));
+    const [liveUsers, totalVisitors, todayVisitors, liveList] = await Promise.all([
+      Visitor.countDocuments({ lastSeen: { $gte: liveSince } }),
+      Visitor.countDocuments(),
+      Visitor.countDocuments({ firstSeen: { $gte: todayStart } }),
+      Visitor.find({ lastSeen: { $gte: liveSince } })
+        .select("visitorId firstSeen lastSeen page")
+        .sort({ lastSeen: -1 })
+        .limit(100)
+        .lean()
+    ]);
+    res.json({ liveUsers, totalVisitors, todayVisitors, liveList });
+  } catch (error) {
+    console.error("ADMIN ANALYTICS ERROR:", error);
+    res.status(500).json({ error: "Unable to load analytics" });
+  }
+});
+
+// ============================================================
 // ADMIN STATS
 // ============================================================
 
@@ -3601,7 +4206,7 @@ app.get(
       const customers =
         await Order.find()
           .select(
-            "appName amount status customerName customerEmail customerPhone razorpayPaymentId createdAt"
+            "appName amount status customerName customerEmail customerPhone paymentGateway razorpayPaymentId razorpayOrderId cashfreePaymentId cashfreeOrderId createdAt"
           )
           .sort({
             createdAt:

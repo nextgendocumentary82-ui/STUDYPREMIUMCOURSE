@@ -1,3 +1,47 @@
+
+/* =========================================================
+   LIVE USER + VISITOR COUNTER
+   Runs on every page that loads app.js.
+========================================================= */
+(function startLiveAnalytics() {
+  const KEY = "spc_visitor_id";
+  let visitorId = localStorage.getItem(KEY);
+  if (!visitorId) {
+    visitorId = (crypto.randomUUID ? crypto.randomUUID() : "v-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    localStorage.setItem(KEY, visitorId);
+  }
+
+  async function heartbeat() {
+    try {
+      const r = await fetch("/api/analytics/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visitorId, page: location.pathname })
+      });
+      const data = await r.json();
+      if (r.ok) renderLiveCounter(data);
+    } catch {}
+  }
+
+  function renderLiveCounter(data) {
+    let el = document.getElementById("liveVisitorCounter");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "liveVisitorCounter";
+      el.className = "live-visitor-counter";
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `<span class="live-dot"></span><b>${Number(data.liveUsers || 0)}</b> Live <span class="live-sep">•</span> <b>${Number(data.totalVisitors || 0).toLocaleString("en-IN")}</b> Visitors`;
+    el.title = `Today: ${Number(data.todayVisitors || 0).toLocaleString("en-IN")} visitors`;
+  }
+
+  heartbeat();
+  setInterval(heartbeat, 15000);
+  window.addEventListener("beforeunload", () => {
+    // The server expires a visitor automatically after 45 seconds.
+  });
+})();
+
 let selectedCategory = "All";
 let currentApp = null;
 let accessType = null;
@@ -659,6 +703,19 @@ async function startPayment() {
   }
 
 
+  const selectedGateway =
+    document.getElementById("paymentGateway")?.value || "cashfree";
+
+  if (selectedGateway === "cashfree") {
+    await startCashfreePayment({ name, email, phone });
+    return;
+  }
+
+  if (selectedGateway === "upi_qr") {
+    await startUpiQrPayment({ name, email, phone });
+    return;
+  }
+
   const payButton =
     document.getElementById("payButton");
 
@@ -893,6 +950,217 @@ async function startPayment() {
   }
 }
 
+
+
+/* =========================================================
+   UPI QR PAYMENT
+========================================================= */
+
+let activeQrOrderId = "";
+
+async function startUpiQrPayment({ name, email, phone }) {
+  const payButton = document.getElementById("payButton");
+  if (!phone) {
+    toast("Please enter your mobile number.");
+    return;
+  }
+
+  if (payButton) {
+    payButton.disabled = true;
+    payButton.textContent = "Preparing QR...";
+  }
+
+  try {
+    const response = await fetch("/api/payments/upi-qr/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        appId: currentApp._id,
+        customerName: name,
+        customerEmail: email,
+        customerPhone: phone
+      })
+    });
+
+    const order = await response.json();
+    if (!response.ok || !order.success) {
+      throw new Error(order.error || "Could not start QR payment.");
+    }
+
+    activeQrOrderId = order.orderId;
+    const qrImage = document.getElementById("upiQrImage");
+    if (qrImage) qrImage.src = order.qrUrl || "/qr-payment.jpeg";
+
+    const text = document.getElementById("qrPayText");
+    if (text) {
+      text.textContent = `Pay exactly ₹${Number(order.amount || 0).toLocaleString("en-IN")} via the QR, then enter your UPI transaction/reference ID.`;
+    }
+
+    const ref = document.getElementById("upiReference");
+    if (ref) ref.value = "";
+
+    document.getElementById("payModal")?.classList.add("hidden");
+    document.getElementById("qrPayModal")?.classList.remove("hidden");
+    resetPayButton();
+  } catch (error) {
+    console.error("UPI QR payment error:", error);
+    toast(error.message || "QR payment setup failed.");
+    resetPayButton();
+  }
+}
+
+function closeQrPayment() {
+  document.getElementById("qrPayModal")?.classList.add("hidden");
+  activeQrOrderId = "";
+}
+
+async function submitUpiQrPayment() {
+  const button = document.getElementById("upiSubmitButton");
+  const reference = document.getElementById("upiReference")?.value?.trim() || "";
+
+  if (!activeQrOrderId) {
+    toast("QR payment session is missing. Please start again.");
+    return;
+  }
+
+  if (!/^[A-Za-z0-9._-]{6,64}$/.test(reference)) {
+    toast("Please enter a valid UPI transaction/reference ID.");
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Submitting...";
+  }
+
+  try {
+    const response = await fetch("/api/payments/upi-qr/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId: activeQrOrderId, reference })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || "Could not submit payment reference.");
+    }
+
+    document.getElementById("qrPayText").textContent =
+      "Reference submitted. Access will unlock automatically only after the admin verifies the real transaction in the UPI/bank account.";
+    if (button) button.textContent = "Verification Pending";
+    toast("Payment reference submitted. Please wait for verification.");
+  } catch (error) {
+    console.error("UPI QR submit error:", error);
+    toast(error.message || "Could not submit payment reference.");
+    if (button) {
+      button.disabled = false;
+      button.textContent = "I Have Paid — Submit Reference";
+    }
+  }
+}
+
+/* =========================================================
+   CASHFREE PAYMENT
+========================================================= */
+
+async function startCashfreePayment({ name, email, phone }) {
+  const payButton = document.getElementById("payButton");
+
+  if (!phone) {
+    toast("Please enter your mobile number for Cashfree payment.");
+    return;
+  }
+
+  if (payButton) {
+    payButton.disabled = true;
+    payButton.textContent = "Creating Cashfree payment...";
+  }
+
+  try {
+    if (typeof Cashfree === "undefined") {
+      throw new Error("Cashfree checkout could not load.");
+    }
+
+    const response = await fetch("/api/payments/cashfree/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        appId: currentApp._id,
+        customerName: name,
+        customerEmail: email,
+        customerPhone: phone
+      })
+    });
+
+    const order = await response.json();
+    if (!response.ok || !order.success || !order.paymentSessionId) {
+      throw new Error(order.error || "Cashfree order could not be created.");
+    }
+
+    const cashfree = Cashfree({
+      mode: order.mode === "sandbox" ? "sandbox" : "production"
+    });
+
+    toast("Opening Cashfree secure checkout...");
+
+    const result = await cashfree.checkout({
+      paymentSessionId: order.paymentSessionId,
+      redirectTarget: "_modal"
+    });
+
+    if (result?.error) {
+      throw new Error(result.error.message || "Cashfree checkout failed.");
+    }
+
+    toast("Checking Cashfree payment status...");
+
+    // Payment status can take a few seconds to reconcile. Poll Cashfree
+    // through our backend and trust only the server-side PAID status.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const verifyResponse = await fetch("/api/payments/cashfree/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: order.orderId })
+      });
+
+      const verified = await verifyResponse.json();
+
+      if (verifyResponse.ok && verified.success && verified.status === "paid") {
+        const accessResponse = await fetch("/api/access/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderId: verified.orderId,
+            type: accessType
+          })
+        });
+
+        const accessResult = await accessResponse.json();
+        if (!accessResponse.ok || !accessResult.success) {
+          throw new Error(accessResult.error || "Could not create secure access.");
+        }
+
+        closePay();
+        toast("Payment verified. Opening access...");
+        setTimeout(() => {
+          window.location.href = accessResult.url;
+        }, 700);
+        return;
+      }
+
+      if (["EXPIRED", "TERMINATED"].includes(String(verified.status || "").toUpperCase())) {
+        throw new Error("Cashfree payment was not completed.");
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    throw new Error("Payment is still pending. Please wait and check again before paying another time.");
+  } catch (error) {
+    console.error("Cashfree payment error:", error);
+    toast(error.message || "Cashfree payment failed.");
+    resetPayButton();
+  }
+}
 
 /* =========================================================
    PAYMENT VERIFICATION

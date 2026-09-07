@@ -1,6 +1,67 @@
+async function approveQrOrder(orderId) {
+  if (!confirm("Have you verified the exact payment amount and transaction reference in your UPI/bank account?")) return;
+  try {
+    await api(`/api/admin/orders/${encodeURIComponent(orderId)}/upi-qr/approve`, { method: "POST" });
+    alert("QR payment verified and access unlocked.");
+    await loadData();
+  } catch (error) {
+    alert(error.message || "Could not approve QR payment.");
+  }
+}
+
+async function rejectQrOrder(orderId) {
+  if (!confirm("Reject this QR payment request?")) return;
+  try {
+    await api(`/api/admin/orders/${encodeURIComponent(orderId)}/upi-qr/reject`, { method: "POST" });
+    alert("QR payment rejected.");
+    await loadData();
+  } catch (error) {
+    alert(error.message || "Could not reject QR payment.");
+  }
+}
+
 let token = localStorage.getItem("pm_admin_token") || "";
 let adminApps = [];
 let adminOrders = [];
+
+let analyticsTimer = null;
+
+async function loadLiveAnalytics() {
+  if (!token) return;
+  try {
+    const data = await api("/api/admin/analytics");
+    const fmt = n => Number(n || 0).toLocaleString("en-IN");
+    const live = document.getElementById("liveUsersStat");
+    const total = document.getElementById("totalVisitorsStat");
+    const today = document.getElementById("todayVisitorsStat");
+    if (live) live.textContent = fmt(data.liveUsers);
+    if (total) total.textContent = fmt(data.totalVisitors);
+    if (today) today.textContent = fmt(data.todayVisitors);
+    const updated = document.getElementById("analyticsUpdated");
+    if (updated) updated.textContent = "Updated " + new Date().toLocaleTimeString();
+
+    const rows = document.getElementById("liveVisitorRows");
+    if (rows) {
+      rows.innerHTML = (data.liveList || []).map(v => `
+        <tr>
+          <td><span class="live-dot" style="display:inline-block"></span> LIVE</td>
+          <td>${esc(String(v.visitorId || "").slice(0, 12))}…</td>
+          <td>${esc(v.page || "/")}</td>
+          <td>${new Date(v.lastSeen).toLocaleTimeString()}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4">No users online right now.</td></tr>`;
+    }
+  } catch (e) {
+    console.error("Live analytics:", e);
+  }
+}
+
+function startLiveAnalyticsPolling() {
+  loadLiveAnalytics();
+  clearInterval(analyticsTimer);
+  analyticsTimer = setInterval(loadLiveAnalytics, 5000);
+}
+
 
 
 /* =========================================================
@@ -265,6 +326,7 @@ function showPanel() {
 
 
   refreshAdmin();
+  startLiveAnalyticsPolling();
 }
 
 
@@ -1003,19 +1065,31 @@ function renderOrders(orders) {
 
           <span>
 
+            Gateway:
+            ${esc(order.paymentGateway || "razorpay")}
+
+            •
+
             Payment ID:
-            ${esc(order.razorpayPaymentId || "—")}
+            ${esc(order.cashfreePaymentId || order.razorpayPaymentId || order.upiReference || "—")}
 
             •
 
             Order ID:
-            ${esc(order.razorpayOrderId || "—")}
+            ${esc(order.cashfreeOrderId || order.razorpayOrderId || order.upiOrderId || "—")}
 
           </span>
 
 
           <br>
 
+          ${String(order.paymentGateway || "").toLowerCase() === "upi_qr" && status === "pending_verification" ? `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              <button class="primary" onclick="approveQrOrder('${order._id}')">✓ Verify & Approve</button>
+              <button class="secondary" onclick="rejectQrOrder('${order._id}')">Reject</button>
+            </div>
+            <small style="display:block;margin-top:8px">Verify the exact amount and reference in your UPI/bank account before approving.</small>
+          ` : ""}
 
           <span>
             ${esc(date)}

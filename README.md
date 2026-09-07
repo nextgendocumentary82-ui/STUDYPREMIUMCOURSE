@@ -123,3 +123,16 @@ Enable these events:
 - `order.paid`
 
 The server verifies the Checkout signature and then fetches the real Razorpay payment status. Access is granted only when Razorpay reports the payment as `captured`. The webhook also reconciles captured payments if the browser closes or Checkout reports a temporary failure.
+
+
+## Cashfree payment setup
+
+The project now supports both Cashfree and Razorpay on the paid-item checkout. Add `CASHFREE_APP_ID`, `CASHFREE_SECRET_KEY`, and `CASHFREE_ENV` to Render Environment Variables. Use `sandbox` while testing and `production` for live payments. Cashfree checkout requires the website domain to be whitelisted in the Cashfree merchant dashboard.
+
+Cashfree webhook URL:
+
+```text
+https://YOUR-RENDER-DOMAIN/api/payments/cashfree/webhook
+```
+
+Enable the payment success, payment failed, and user-dropped webhook events.

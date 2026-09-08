@@ -1722,15 +1722,8 @@ function normalizePhone(value) {
 }
 
 function resolvePurchasePlan(item, body={}) {
-  const requestedId=String(body.planId||"").trim();
-  const requestedDays=Number(body.durationDays||0);
-  const plans=Array.isArray(item.purchasePlans)?item.purchasePlans.filter(x=>x.active!==false && Number(x.days)>=0 && Number(x.price)>=0):[];
-  if(plans.length){
-    const plan=plans.find(x=>requestedId && String(x.planId)===requestedId) || plans.find(x=>requestedDays && Number(x.days)===requestedDays);
-    if(!plan) throw new Error("Please select a valid purchase plan.");
-    return {planId:String(plan.planId),planLabel:String(plan.label),days:Number(plan.days),price:Number(plan.price)};
-  }
-  return {planId:"default",planLabel:String(item.validity||"Lifetime"),days:requestedDays>0?requestedDays:0,price:Number(item.price||0)};
+  // Lifetime-only purchase system. Any old duration/plan fields are ignored.
+  return {planId:"lifetime",planLabel:"Lifetime",days:0,price:Number(item.price||0)};
 }
 
 function makeOwnershipExpiry(app, order) {
@@ -1865,7 +1858,6 @@ function normalizeAppBody(body) {
 
     price,
 
-    purchasePlans: Array.isArray(body.purchasePlans) ? body.purchasePlans.map((x,i)=>({planId:String(x.planId||`plan_${i+1}`),label:String(x.label||(Number(x.days||0)>0?`${Number(x.days)} Days`:"Lifetime")),days:Number(x.days||0),price:Number(x.price||0),active:x.active!==false})).filter(x=>x.days>=0 && x.price>=0).slice(0,20) : [],
 
     websiteUrl:
       String(
@@ -4643,10 +4635,10 @@ app.get("/api/admin/coupons", requireAdmin, async(req,res)=>{try{res.json(await 
 app.post("/api/admin/coupons", requireAdmin, async(req,res)=>{try{const x=await Coupon.create({code:String(req.body.code||"").trim().toUpperCase(),type:req.body.type||"percent",value:Number(req.body.value||0),maxUses:Number(req.body.maxUses||0),minAmount:Number(req.body.minAmount||0),endAt:req.body.endAt||null});await writeAudit(req,"create_coupon","coupon",x._id,{code:x.code});res.json(x)}catch(e){res.status(400).json({error:e.code===11000?"Coupon already exists":e.message})}});
 app.delete("/api/admin/coupons/:id", requireAdmin, async(req,res)=>{try{await Coupon.findByIdAndDelete(req.params.id);await writeAudit(req,"delete_coupon","coupon",req.params.id);res.json({success:true})}catch(e){res.status(500).json({error:"Unable to delete coupon"})}});
 app.post("/api/admin/notifications", requireAdmin, async(req,res)=>{try{const n=await sendNotification(req.body.audienceType||"all",req.body.audienceId||"",String(req.body.title||"Notification").slice(0,160),String(req.body.message||"").slice(0,3000),req.body.type||"general");await writeAudit(req,"send_notification","notification",n?._id,{audience:req.body.audienceType});res.json(n)}catch(e){res.status(500).json({error:"Unable to send notification"})}});
-app.post("/api/admin/access/grant", requireAdmin, async(req,res)=>{try{const email=normalizeEmail(req.body.email);const appId=String(req.body.appId||"");const days=Number(req.body.durationDays||0);if(!email||!appId)return res.status(400).json({error:"Student email and batch are required"});const user=await User.findOne({email});if(!user)return res.status(404).json({error:"Student not found"});const appItem=await AppModel.findById(appId).lean();if(!appItem)return res.status(404).json({error:"Batch not found"});const manualOrder=await Order.create({paymentGateway:"razorpay",razorpayOrderId:`manual_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,appId:appItem._id,appName:appItem.name,amount:0,currency:"INR",status:"paid",durationDays:days,planId:"manual",planLabel:days>0?`${days} Days`:`Lifetime`,customerName:user.name,customerEmail:user.email,customerPhone:""});const expiresAt=days>0?new Date(Date.now()+days*86400000):null;const own=await BatchOwnership.findOneAndUpdate({appId:appItem._id,ownerEmail:email},{$set:{orderId:manualOrder._id,active:true,durationDays:days,expiresAt,donatedAt:null}},{upsert:true,new:true,setDefaultsOnInsert:true});await writeAudit(req,"grant_access","batch_ownership",own._id,{email,appId,durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to grant access"})}});
-app.put("/api/admin/access/:id", requireAdmin, async(req,res)=>{try{const own=await BatchOwnership.findById(req.params.id);if(!own)return res.status(404).json({error:"Access record not found"});const days=Number(req.body.durationDays||0);own.active=true;own.durationDays=days;own.expiresAt=days>0?new Date(Date.now()+days*86400000):null;await own.save();await writeAudit(req,"edit_access","batch_ownership",own._id,{durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to edit access"})}});
+app.post("/api/admin/access/grant", requireAdmin, async(req,res)=>{try{const email=normalizeEmail(req.body.email);const appId=String(req.body.appId||"");const days=0;if(!email||!appId)return res.status(400).json({error:"Student email and batch are required"});const user=await User.findOne({email});if(!user)return res.status(404).json({error:"Student not found"});const appItem=await AppModel.findById(appId).lean();if(!appItem)return res.status(404).json({error:"Batch not found"});const manualOrder=await Order.create({paymentGateway:"razorpay",razorpayOrderId:`manual_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,appId:appItem._id,appName:appItem.name,amount:0,currency:"INR",status:"paid",durationDays:days,planId:"manual",planLabel:days>0?`${days} Days`:`Lifetime`,customerName:user.name,customerEmail:user.email,customerPhone:""});const expiresAt=days>0?new Date(Date.now()+days*86400000):null;const own=await BatchOwnership.findOneAndUpdate({appId:appItem._id,ownerEmail:email},{$set:{orderId:manualOrder._id,active:true,durationDays:days,expiresAt,donatedAt:null}},{upsert:true,new:true,setDefaultsOnInsert:true});await writeAudit(req,"grant_access","batch_ownership",own._id,{email,appId,durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to grant access"})}});
+app.put("/api/admin/access/:id", requireAdmin, async(req,res)=>{try{const own=await BatchOwnership.findById(req.params.id);if(!own)return res.status(404).json({error:"Access record not found"});const days=0;own.active=true;own.durationDays=days;own.expiresAt=days>0?new Date(Date.now()+days*86400000):null;await own.save();await writeAudit(req,"edit_access","batch_ownership",own._id,{durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to edit access"})}});
 app.post("/api/admin/access/:id/remove", requireAdmin, async(req,res)=>{try{const own=await BatchOwnership.findByIdAndUpdate(req.params.id,{$set:{active:false}},{new:true});if(!own)return res.status(404).json({error:"Access record not found"});await writeAudit(req,"remove_access","batch_ownership",own._id);res.json({success:true,ownership:own})}catch(e){res.status(500).json({error:"Unable to remove access"})}});
-app.post("/api/admin/access/:id/restore", requireAdmin, async(req,res)=>{try{const own=await BatchOwnership.findById(req.params.id);if(!own)return res.status(404).json({error:"Access record not found"});const days=Number(req.body.durationDays!==undefined?req.body.durationDays:own.durationDays||0);own.active=true;own.durationDays=days;own.expiresAt=days>0?new Date(Date.now()+days*86400000):null;await own.save();await writeAudit(req,"restore_access","batch_ownership",own._id,{durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to restore access"})}});
+app.post("/api/admin/access/:id/restore", requireAdmin, async(req,res)=>{try{const own=await BatchOwnership.findById(req.params.id);if(!own)return res.status(404).json({error:"Access record not found"});const days=0;own.active=true;own.durationDays=days;own.expiresAt=days>0?new Date(Date.now()+days*86400000):null;await own.save();await writeAudit(req,"restore_access","batch_ownership",own._id,{durationDays:days});res.json({success:true,ownership:own})}catch(e){res.status(400).json({error:e.message||"Unable to restore access"})}});
 app.get("/api/admin/students", requireAdmin, async(req,res)=>{try{const q=String(req.query.q||"").trim();const users=await User.find(q?{$or:[{name:{$regex:q,$options:"i"}},{email:{$regex:q,$options:"i"}}]}:{}).select("name email active createdAt updatedAt").sort({createdAt:-1}).limit(500).lean();const emails=users.map(u=>u.email);const owners=await BatchOwnership.find({ownerEmail:{$in:emails}}).populate("appId","name").lean();res.json(users.map(u=>({...u,batches:owners.filter(o=>o.ownerEmail===u.email).map(o=>({id:o._id,name:o.appId?.name,active:o.active,expiresAt:o.expiresAt,durationDays:o.durationDays||0}))})));}catch(e){res.status(500).json({error:"Unable to load students"})}});
 app.put("/api/admin/students/:id", requireAdmin, async(req,res)=>{try{const u=await User.findById(req.params.id);if(!u)return res.status(404).json({error:"Student not found"});if(req.body.name!==undefined)u.name=String(req.body.name).trim().slice(0,80);if(req.body.email!==undefined){const email=normalizeEmail(req.body.email);if(!email)return res.status(400).json({error:"Valid email required"});const exists=await User.findOne({email,_id:{$ne:u._id}});if(exists)return res.status(409).json({error:"Email already in use"});const oldEmail=u.email;u.email=email;await BatchOwnership.updateMany({ownerEmail:oldEmail},{$set:{ownerEmail:email}});await Order.updateMany({customerEmail:oldEmail},{$set:{customerEmail:email}});}if(req.body.active!==undefined)u.active=!!req.body.active;await u.save();await writeAudit(req,"edit_student","student",u._id,{name:u.name,email:u.email,active:u.active});res.json({success:true,student:{id:u._id,name:u.name,email:u.email,active:u.active}})}catch(e){res.status(400).json({error:e.message||"Unable to edit student"})}});
 app.delete("/api/admin/students/:id", requireAdmin, async(req,res)=>{try{const u=await User.findById(req.params.id);if(!u)return res.status(404).json({error:"Student not found"});await BatchOwnership.updateMany({ownerEmail:u.email},{$set:{active:false}});u.active=false;await u.save();await writeAudit(req,"remove_student","student",u._id,{email:u.email});res.json({success:true})}catch(e){res.status(500).json({error:"Unable to remove student"})}});
@@ -5141,18 +5133,8 @@ async function ensureDemoApps() {
 }
 
 async function ensurePurchasePlans(){
-  const apps=await AppModel.find({accessType:"paid",price:{$gt:0},$or:[{purchasePlans:{$exists:false}},{purchasePlans:{$size:0}}]}).select("price validity");
-  for(const a of apps){
-    const base=Number(a.price||0);
-    const plans=[
-      {planId:"days_30",label:"30 Days",days:30,price:base,active:true},
-      {planId:"days_90",label:"90 Days",days:90,price:Math.round(base*2),active:true},
-      {planId:"days_180",label:"180 Days",days:180,price:Math.round(base*3),active:true},
-      {planId:"days_365",label:"1 Year",days:365,price:Math.round(base*5),active:true},
-      {planId:"lifetime",label:"Lifetime",days:0,price:Math.round(base*8),active:true}
-    ];
-    await AppModel.updateOne({_id:a._id},{$set:{purchasePlans:plans}});
-  }
+  // Legacy purchasePlans are intentionally ignored. All paid purchases are Lifetime at the batch price.
+  return;
 }
 
 // ============================================================

@@ -682,7 +682,6 @@ function handleAccess(type) {
       `Pay ${money(price)} for ${currentApp.name} (${currentApp.validity || "Lifetime"}).`;
   }
 
-  renderPurchasePlans();
   const modal =
     document.getElementById("payModal");
 
@@ -697,19 +696,9 @@ function handleAccess(type) {
 ========================================================= */
 
 function getSelectedPurchasePlan(){
-  const plans=Array.isArray(currentApp?.purchasePlans)?currentApp.purchasePlans.filter(x=>x.active!==false && Number(x.days)>=0 && Number(x.price)>=0):[];
-  const select=document.getElementById("purchasePlan");
-  if(!plans.length) return {planId:"default",durationDays:0,label:currentApp?.validity||"Lifetime",price:Number(currentApp?.price||0)};
-  const plan=plans.find(x=>String(x.planId)===String(select?.value)) || plans[0];
-  return {planId:String(plan.planId),durationDays:Number(plan.days),label:String(plan.label),price:Number(plan.price)};
+  return {planId:"lifetime",durationDays:0,label:"Lifetime",price:Number(currentApp?.price||0)};
 }
 
-function renderPurchasePlans(){
-  const select=document.getElementById("purchasePlan"); if(!select) return;
-  const plans=Array.isArray(currentApp?.purchasePlans)?currentApp.purchasePlans.filter(x=>x.active!==false && Number(x.days)>=0 && Number(x.price)>=0):[];
-  if(!plans.length){ select.innerHTML=`<option value="default">${esc(currentApp?.validity||"Lifetime")} — ${money(currentApp?.price||0)}</option>`; return; }
-  select.innerHTML=plans.map(x=>`<option value="${esc(x.planId)}">${esc(x.label)} — ${money(x.price)}</option>`).join('');
-}
 
 function closePay() {
 

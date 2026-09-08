@@ -120,6 +120,38 @@
     </section>
 
 
+
+    <div class="advanced-nav">
+      <button class="adv-tab active" onclick="showAdvTab('analytics',this)">📊 Analytics</button>
+      <button class="adv-tab" onclick="showAdvTab('students',this)">👨‍🎓 Students</button>
+      <button class="adv-tab" onclick="showAdvTab('course',this)">📚 Course Progress</button>
+      <button class="adv-tab" onclick="showAdvTab('gateway',this)">💳 Gateway Reports</button>
+      <button class="adv-tab" onclick="showAdvTab('notifications',this)">🔔 Notifications</button>
+      <button class="adv-tab" onclick="showAdvTab('maintenance',this)">🛠️ Maintenance</button>
+      <button class="adv-tab" onclick="showAdvTab('backup',this)">💾 Backup</button>
+      <button class="adv-tab" onclick="showAdvTab('activity',this)">🧾 Activity</button>
+    </div>
+
+    <section id="adv-analytics" class="adv-view panel">
+      <div class="section-title"><h2>📊 Advanced Analytics</h2><button class="secondary adv-small" onclick="loadAdvancedAnalytics()">↻ Refresh</button></div>
+      <div id="advancedStats" class="stats adv-stats"></div>
+      <div class="advanced-grid"><div class="panel"><h3>🔥 Popular Batches</h3><div id="popularBatches"></div></div><div class="panel"><h3>💳 Gateway Performance</h3><div id="gatewayMini"></div></div></div>
+    </section>
+
+    <section id="adv-students" class="adv-view panel hidden"><div class="section-title"><h2>👨‍🎓 Student Management</h2><button class="secondary adv-small" onclick="loadStudents()">↻ Refresh</button></div><input id="studentSearch" placeholder="Search name or email" oninput="debouncedStudents()"><div id="studentRows"></div></section>
+
+    <section id="adv-course" class="adv-view panel hidden"><div class="section-title"><h2>📚 Course Progress & Lessons</h2><button class="secondary adv-small" onclick="loadLessons()">↻ Refresh</button></div><div class="lesson-form"><select id="lessonApp"></select><input id="lessonTitle" placeholder="Lesson title"><input id="lessonVideo" placeholder="Video URL"><input id="lessonMaterial" placeholder="Notes / PDF URL"><input id="lessonOrder" type="number" placeholder="Order"><textarea id="lessonDesc" placeholder="Lesson description"></textarea><button class="primary" onclick="createLesson()">+ Add Lesson</button></div><div id="lessonRows"></div></section>
+
+    <section id="adv-gateway" class="adv-view panel hidden"><div class="section-title"><h2>💳 Complete Gateway-wise Reporting</h2><button class="secondary adv-small" onclick="loadGatewayReport()">↻ Refresh</button></div><div id="gatewayReport"></div></section>
+
+    <section id="adv-notifications" class="adv-view panel hidden"><h2>🔔 Send Notification</h2><div class="form-grid"><select id="notifyAudience"><option value="all">All Students</option><option value="student">Specific Student (email)</option><option value="batch">Specific Batch (ID)</option></select><input id="notifyAudienceId" placeholder="Email or Batch ID (only if selected)"><input id="notifyTitle" placeholder="Notification title"><textarea id="notifyMessage" placeholder="Message"></textarea></div><button class="primary" onclick="sendAdminNotification()">Send Notification</button></section>
+
+    <section id="adv-maintenance" class="adv-view panel hidden"><h2>🛠️ Maintenance Mode</h2><p class="small-muted">Turn this on to show a maintenance screen to public users while admin remains accessible.</p><label class="check"><input id="maintenanceMode" type="checkbox"> Enable maintenance mode</label><label class="check"><input id="maintenanceAllowUsers" type="checkbox"> Allow users during maintenance</label><textarea id="maintenanceMessage" placeholder="Maintenance message"></textarea><button class="primary" onclick="saveMaintenance()">Save Maintenance Settings</button></section>
+
+    <section id="adv-backup" class="adv-view panel hidden"><h2>💾 Backup & Export</h2><p class="small-muted">Export apps, orders, students, ownerships, lessons and notifications into a JSON backup.</p><button class="primary" onclick="downloadBackup()">Download Full Backup</button></section>
+
+    <section id="adv-activity" class="adv-view panel hidden"><div class="section-title"><h2>🧾 Admin Activity Log</h2><button class="secondary adv-small" onclick="loadAudit()">↻ Refresh</button></div><div id="auditRows"></div></section>
+
     <!-- ===================================================
          APP MANAGEMENT
     ==================================================== -->
@@ -225,10 +257,7 @@
           <!-- VALIDITY -->
 
           <input id="fValidity" type="text" placeholder="Validity e.g. Lifetime">
-
-          <!-- PURCHASE PLANS -->
-          <textarea id="fPlans" placeholder="Purchase plans — one per line: Label|Days|Price&#10;30 Days|30|199&#10;3 Months|90|399&#10;1 Year|365|999&#10;Lifetime|0|1499"></textarea>
-          <small class="form-help">Days = 0 means Lifetime. User can select one of these plans before payment.</small>
+          <textarea id="fPurchasePlans" placeholder="Purchase plans JSON: [{&quot;label&quot;:&quot;30 Days&quot;,&quot;days&quot;:30,&quot;price&quot;:199},{&quot;label&quot;:&quot;90 Days&quot;,&quot;days&quot;:90,&quot;price&quot;:399},{&quot;label&quot;:&quot;Lifetime&quot;,&quot;days&quot;:0,&quot;price&quot;:1499}]"></textarea><small class="small-muted">Student purchase-duration plans. Example: 30/90/180/365 days. Lifetime can use the normal Validity field.</small>
 
 
           <!-- RATING -->

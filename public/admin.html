@@ -143,7 +143,7 @@
 <div class="admin-subpanel"><h3>🔑 Grant / Manage Batch Access</h3><div class="form-grid">
 <input id="grantEmail" placeholder="Student email">
 <select id="grantApp"><option value="">Select Batch</option></select>
-<input id="grantDays" type="number" min="0" placeholder="Custom days (0 = Lifetime)">
+<select id="grantDays"><option value="365">1 Year (365 Days)</option><option value="730">2 Years (730 Days)</option><option value="0">Lifetime</option><option value="3">Custom: 3 Days</option></select>
 </div><button class="primary" onclick="grantAccess()">🎓 Grant Access</button></div>
 <div class="admin-subpanel"><h3>🔎 Search Students</h3><input id="studentSearch" placeholder="Search name or email" oninput="debouncedStudents()"></div>
 <div id="studentRows"></div></section>

@@ -478,7 +478,7 @@ function renderDetail(app) {
         🌐 Visit Website
       </button>
 
-      ${price > 0 ? `<button class="secondary" onclick="openPurchasedBatch()">🔐 Already Purchased? Open Batch</button>` : ""}
+      ${price > 0 ? `<button class="secondary" onclick="openAlreadyPurchasedModal()">🔐 Already Purchased? Open Batch</button>` : ""}
 
     </div>
 
@@ -616,9 +616,19 @@ function handleAccess(type) {
     document.getElementById("payText");
 
   if (payText) {
+    payText.textContent = `Pay ${money(price)} for ${currentApp.name}. Select your access duration below.`;
+  }
 
-    payText.textContent =
-      `Pay ${money(price)} for ${currentApp.name} (${currentApp.validity || "Lifetime"}).`;
+  const durationSelect = document.getElementById("purchaseDuration");
+  if (durationSelect) {
+    const choices = Array.isArray(currentApp.validityOptions) && currentApp.validityOptions.length ? currentApp.validityOptions : [currentApp.validity || "Lifetime"];
+    durationSelect.innerHTML = choices.map(x => `<option value="${esc(x)}">Validity: ${esc(x)}</option>`).join("");
+  }
+
+  const savedBuyer = JSON.parse(localStorage.getItem("spc_last_buyer") || "null");
+  if (savedBuyer) {
+    const n=document.getElementById("buyerName"),e=document.getElementById("buyerEmail"),ph=document.getElementById("buyerPhone");
+    if(n&&!n.value)n.value=savedBuyer.name||""; if(e&&!e.value)e.value=savedBuyer.email||""; if(ph&&!ph.value)ph.value=savedBuyer.phone||"";
   }
 
   const modal =
@@ -651,17 +661,6 @@ function closePay() {
    PAYMENT
 ========================================================= */
 
-async function loadPurchaseDurations() {
-  try {
-    const r = await fetch("/api/purchase-durations");
-    const data = await r.json();
-    const select = document.getElementById("purchaseDuration");
-    if (!select || !r.ok) return;
-    select.innerHTML = (data.durations || []).map(x => `<option value="${esc(x.key)}">${esc(x.label)}</option>`).join("");
-    if (data.defaultDuration) select.value = data.defaultDuration;
-  } catch (e) { console.warn("Purchase durations could not load", e); }
-}
-
 async function startPayment() {
 
   if (!currentApp) {
@@ -687,7 +686,7 @@ async function startPayment() {
       ?.value
       ?.trim();
 
-  const purchaseDuration = document.getElementById("purchaseDuration")?.value || "1_year";
+  const purchaseDuration = document.getElementById("purchaseDuration")?.value || currentApp.validity || "Lifetime";
 
   if (!name) {
 
@@ -721,13 +720,15 @@ async function startPayment() {
   const selectedGateway =
     document.getElementById("paymentGateway")?.value || "cashfree";
 
+  localStorage.setItem("spc_last_buyer", JSON.stringify({ name, email, phone }));
+
   if (selectedGateway === "cashfree") {
-    await startCashfreePayment({ name, email, phone, purchaseDuration });
+    await startCashfreePayment({ name, email, phone });
     return;
   }
 
   if (selectedGateway === "upi_qr") {
-    await startUpiQrPayment({ name, email, phone, purchaseDuration });
+    await startUpiQrPayment({ name, email, phone });
     return;
   }
 
@@ -769,7 +770,6 @@ async function startPayment() {
             customerEmail: email,
 
             customerPhone: phone,
-
             purchaseDuration
 
           })
@@ -860,6 +860,7 @@ async function startPayment() {
 
       handler: async function (payment) {
 
+        localStorage.setItem("spc_last_buyer", JSON.stringify({ name, email, phone }));
         await verifyPayment(payment);
 
       }
@@ -969,15 +970,38 @@ async function startPayment() {
 
 
 
+
+function openAlreadyPurchasedModal() {
+  const saved = JSON.parse(localStorage.getItem("spc_last_buyer") || "null");
+  const e=document.getElementById("existingBuyerEmail"), p=document.getElementById("existingBuyerPhone");
+  if(e && saved?.email) e.value=saved.email;
+  if(p && saved?.phone) p.value=saved.phone;
+  document.getElementById("alreadyPurchasedModal")?.classList.remove("hidden");
+}
+function closeAlreadyPurchased() { document.getElementById("alreadyPurchasedModal")?.classList.add("hidden"); }
+async function openAlreadyPurchased() {
+  if(!currentApp) return toast("Course information is missing.");
+  const email=document.getElementById("existingBuyerEmail")?.value.trim();
+  const phone=document.getElementById("existingBuyerPhone")?.value.trim();
+  if(!email || !phone) return toast("Enter the same email and mobile number used during payment.");
+  try {
+    const r=await fetch("/api/purchases/open",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({appId:currentApp._id,email,phone})});
+    const d=await r.json();
+    if(!r.ok || !d.success) throw new Error(d.error||"Purchase not found.");
+    localStorage.setItem("spc_last_buyer",JSON.stringify({email,phone}));
+    closeAlreadyPurchased();
+    toast("Purchase verified. Opening batch...");
+    location.href=d.url;
+  } catch(e){ toast(e.message); }
+}
+
 /* =========================================================
    UPI QR PAYMENT
 ========================================================= */
 
 let activeQrOrderId = "";
-let activeQrBuyer = { name: "", email: "", phone: "" };
-let upiStatusTimer = null;
 
-async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_year" }) {
+async function startUpiQrPayment({ name, email, phone }) {
   const payButton = document.getElementById("payButton");
   if (!phone) {
     toast("Please enter your mobile number.");
@@ -998,7 +1022,7 @@ async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_yea
         customerName: name,
         customerEmail: email,
         customerPhone: phone,
-        purchaseDuration
+        purchaseDuration: document.getElementById("purchaseDuration")?.value || currentApp.validity || "Lifetime"
       })
     });
 
@@ -1008,8 +1032,6 @@ async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_yea
     }
 
     activeQrOrderId = order.orderId;
-    activeQrBuyer = { name, email, phone };
-    if (upiStatusTimer) clearInterval(upiStatusTimer);
     const qrImage = document.getElementById("upiQrImage");
     if (qrImage) qrImage.src = order.qrUrl || "/qr-payment.jpeg";
 
@@ -1034,8 +1056,6 @@ async function startUpiQrPayment({ name, email, phone, purchaseDuration = "1_yea
 function closeQrPayment() {
   document.getElementById("qrPayModal")?.classList.add("hidden");
   activeQrOrderId = "";
-  activeQrBuyer = { name: "", email: "", phone: "" };
-  if (upiStatusTimer) { clearInterval(upiStatusTimer); upiStatusTimer = null; }
 }
 
 async function submitUpiQrPayment() {
@@ -1071,8 +1091,7 @@ async function submitUpiQrPayment() {
     document.getElementById("qrPayText").textContent =
       "Reference submitted. Access will unlock automatically only after the admin verifies the real transaction in the UPI/bank account.";
     if (button) button.textContent = "Verification Pending";
-    toast("Payment reference submitted. Admin verification ke baad access automatically open hoga.");
-    startUpiApprovalPolling();
+    toast("Payment reference submitted. Please wait for verification.");
   } catch (error) {
     console.error("UPI QR submit error:", error);
     toast(error.message || "Could not submit payment reference.");
@@ -1087,29 +1106,7 @@ async function submitUpiQrPayment() {
    CASHFREE PAYMENT
 ========================================================= */
 
-function startUpiApprovalPolling() {
-  if (upiStatusTimer) clearInterval(upiStatusTimer);
-  let tries = 0;
-  upiStatusTimer = setInterval(async () => {
-    tries++;
-    if (!activeQrOrderId || tries > 180) { clearInterval(upiStatusTimer); upiStatusTimer = null; return; }
-    try {
-      const r = await fetch("/api/payments/upi-qr/status", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ orderId:activeQrOrderId, email:activeQrBuyer.email, phone:activeQrBuyer.phone }) });
-      const d = await r.json();
-      if (!r.ok) return;
-      if (d.status === "paid" && d.accessActive) {
-        clearInterval(upiStatusTimer); upiStatusTimer = null;
-        document.getElementById("qrPayText").textContent = `Payment approved. ${d.purchaseDurationLabel || "Course access"} active. Opening batch...`;
-        const open = await fetch("/api/purchase/open", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ appId:currentApp._id, ...activeQrBuyer }) });
-        const od = await open.json();
-        if (!open.ok || !od.success) throw new Error(od.error || "Could not open purchased batch.");
-        location.href = od.url;
-      }
-    } catch (e) { console.warn("UPI approval polling", e); }
-  }, 4000);
-}
-
-async function startCashfreePayment({ name, email, phone, purchaseDuration = "1_year" }) {
+async function startCashfreePayment({ name, email, phone }) {
   const payButton = document.getElementById("payButton");
 
   if (!phone) {
@@ -1135,7 +1132,7 @@ async function startCashfreePayment({ name, email, phone, purchaseDuration = "1_
         customerName: name,
         customerEmail: email,
         customerPhone: phone,
-        purchaseDuration
+        purchaseDuration: document.getElementById("purchaseDuration")?.value || currentApp.validity || "Lifetime"
       })
     });
 
@@ -1491,6 +1488,36 @@ async function loadDonationLeaderboard() {
         <strong>₹${Number(x.amount || 0).toLocaleString("en-IN")}</strong>
       </div>`).join("");
   } catch (e) { el.innerHTML = `<div class="loading">${esc(e.message)}</div>`; }
+}
+
+
+let activeDonationQrOrderId="";
+async function startDonationQrPayment(){
+  const donorName=document.getElementById("donorName")?.value.trim();
+  const donorEmail=document.getElementById("donorEmail")?.value.trim();
+  const amount=Number(document.getElementById("donorAmount")?.value||0);
+  if(!donorName||!donorEmail||amount<1)return toast("Enter your name, email and donation amount.");
+  try{
+    const r=await fetch("/api/donations/payment/upi-qr/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({donorName,donorEmail,amount})});
+    const d=await r.json(); if(!r.ok||!d.success)throw new Error(d.error||"Could not create donation QR payment.");
+    activeDonationQrOrderId=d.orderId;
+    const img=document.getElementById("donationQrImage"); if(img)img.src=d.qrUrl||"/qr-payment.jpeg";
+    const txt=document.getElementById("donationQrText"); if(txt)txt.textContent=`Scan the QR and pay exactly ₹${Number(d.amount).toLocaleString("en-IN")} then submit your UTR/reference.`;
+    document.getElementById("donationQrReference").value="";
+    document.getElementById("donationQrModal")?.classList.remove("hidden");
+  }catch(e){toast(e.message)}
+}
+function closeDonationQrPayment(){document.getElementById("donationQrModal")?.classList.add("hidden");activeDonationQrOrderId=""}
+async function submitDonationQrPayment(){
+  const reference=document.getElementById("donationQrReference")?.value.trim()||"";
+  if(!activeDonationQrOrderId)return toast("Donation QR session is missing.");
+  if(!/^[A-Za-z0-9._-]{6,64}$/.test(reference))return toast("Enter a valid UPI transaction/reference ID.");
+  const b=document.getElementById("donationQrSubmit"); if(b){b.disabled=true;b.textContent="Submitting..."}
+  try{
+    const r=await fetch("/api/donations/payment/upi-qr/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({orderId:activeDonationQrOrderId,reference})});
+    const d=await r.json(); if(!r.ok||!d.success)throw new Error(d.error||"Could not submit donation reference.");
+    closeDonationQrPayment(); document.getElementById("donorAmount").value=""; toast("Donation reference submitted. Admin verification pending.");
+  }catch(e){toast(e.message);if(b){b.disabled=false;b.textContent="I Have Paid — Submit UTR"}}
 }
 
 async function startDonationPayment() {

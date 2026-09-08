@@ -138,7 +138,15 @@
       <div class="advanced-grid"><div class="panel"><h3>🔥 Popular Batches</h3><div id="popularBatches"></div></div><div class="panel"><h3>💳 Gateway Performance</h3><div id="gatewayMini"></div></div></div>
     </section>
 
-    <section id="adv-students" class="adv-view panel hidden"><div class="section-title"><h2>👨‍🎓 Student Management</h2><button class="secondary adv-small" onclick="loadStudents()">↻ Refresh</button></div><input id="studentSearch" placeholder="Search name or email" oninput="debouncedStudents()"><div id="studentRows"></div></section>
+    <section id="adv-students" class="adv-view panel hidden">
+<div class="section-title"><h2>👨‍🎓 Student Management</h2><button class="secondary adv-small" onclick="loadStudents()">↻ Refresh</button></div>
+<div class="admin-subpanel"><h3>🔑 Grant / Manage Batch Access</h3><div class="form-grid">
+<input id="grantEmail" placeholder="Student email">
+<select id="grantApp"><option value="">Select Batch</option></select>
+<input id="grantDays" type="number" min="0" placeholder="Custom days (0 = Lifetime)">
+</div><button class="primary" onclick="grantAccess()">🎓 Grant Access</button></div>
+<div class="admin-subpanel"><h3>🔎 Search Students</h3><input id="studentSearch" placeholder="Search name or email" oninput="debouncedStudents()"></div>
+<div id="studentRows"></div></section>
 
     <section id="adv-course" class="adv-view panel hidden"><div class="section-title"><h2>📚 Course Progress & Lessons</h2><button class="secondary adv-small" onclick="loadLessons()">↻ Refresh</button></div><div class="lesson-form"><select id="lessonApp"></select><input id="lessonTitle" placeholder="Lesson title"><input id="lessonVideo" placeholder="Video URL"><input id="lessonMaterial" placeholder="Notes / PDF URL"><input id="lessonOrder" type="number" placeholder="Order"><textarea id="lessonDesc" placeholder="Lesson description"></textarea><button class="primary" onclick="createLesson()">+ Add Lesson</button></div><div id="lessonRows"></div></section>
 

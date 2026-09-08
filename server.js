@@ -1371,7 +1371,11 @@ const settingsSchema =
         type: String,
         default:
           "LEARN • PREPARE • SUCCEED"
-      }
+      },
+      maintenanceMode: { type: Boolean, default: false },
+      maintenanceMessage: { type: String, default: "We are updating the course platform. Please try again shortly." },
+      maintenanceAllowUsers: { type: Boolean, default: false },
+      notificationEmail: { type: Boolean, default: false }
     },
     {
       timestamps: true
@@ -1483,6 +1487,86 @@ const Settings =
     "Settings",
     settingsSchema
   );
+
+// ============================================================
+// ADVANCED ANALYTICS / COURSE PROGRESS / NOTIFICATIONS
+// ============================================================
+const couponSchema = new mongoose.Schema({
+  code:{type:String,required:true,unique:true,uppercase:true,trim:true}, type:{type:String,enum:["percent","fixed"],default:"percent"}, value:{type:Number,min:0,required:true}, maxUses:{type:Number,default:0}, usedCount:{type:Number,default:0}, minAmount:{type:Number,default:0}, startAt:{type:Date,default:null}, endAt:{type:Date,default:null}, active:{type:Boolean,default:true}
+},{timestamps:true});
+const Coupon = mongoose.model("Coupon", couponSchema);
+
+const courseLessonSchema = new mongoose.Schema({
+  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true, index: true },
+  title: { type: String, required: true, trim: true, maxlength: 180 },
+  description: { type: String, default: "", maxlength: 2000 },
+  videoUrl: { type: String, default: "" },
+  materialUrl: { type: String, default: "" },
+  order: { type: Number, default: 0 },
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+const CourseLesson = mongoose.model("CourseLesson", courseLessonSchema);
+
+const progressSchema = new mongoose.Schema({
+  userEmail: { type: String, required: true, lowercase: true, index: true },
+  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true, index: true },
+  lessonId: { type: mongoose.Schema.Types.ObjectId, ref: "CourseLesson", required: true },
+  completed: { type: Boolean, default: false },
+  lastWatchedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+progressSchema.index({ userEmail: 1, appId: 1, lessonId: 1 }, { unique: true });
+const Progress = mongoose.model("Progress", progressSchema);
+
+const notificationSchema = new mongoose.Schema({
+  audienceType: { type: String, enum: ["all", "batch", "student"], required: true },
+  audienceId: { type: String, default: "" },
+  title: { type: String, required: true, maxlength: 160 },
+  message: { type: String, required: true, maxlength: 3000 },
+  type: { type: String, default: "general" },
+  eventKey: { type: String, default: "", index: true },
+  createdBy: { type: String, default: "admin" }
+}, { timestamps: true });
+const Notification = mongoose.model("Notification", notificationSchema);
+
+const notificationReadSchema = new mongoose.Schema({
+  notificationId: { type: mongoose.Schema.Types.ObjectId, ref: "Notification", required: true },
+  userEmail: { type: String, required: true, lowercase: true, index: true },
+  readAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+notificationReadSchema.index({ notificationId: 1, userEmail: 1 }, { unique: true });
+const NotificationRead = mongoose.model("NotificationRead", notificationReadSchema);
+
+const auditLogSchema = new mongoose.Schema({
+  admin: { type: String, default: "admin" },
+  action: { type: String, required: true },
+  entityType: { type: String, default: "system" },
+  entityId: { type: String, default: "" },
+  meta: { type: mongoose.Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
+const AuditLog = mongoose.model("AuditLog", auditLogSchema);
+
+async function writeAudit(req, action, entityType="system", entityId="", meta={}) {
+  try { await AuditLog.create({ admin: req.admin?.username || "admin", action, entityType, entityId: String(entityId || ""), meta }); } catch (e) { console.error("AUDIT LOG ERROR", e.message); }
+}
+
+async function sendNotification(audienceType, audienceId, title, message, type="general", eventKey="") {
+  try { return await Notification.create({ audienceType, audienceId: String(audienceId || ""), title, message, type, eventKey }); } catch (e) { console.error("NOTIFICATION ERROR", e.message); return null; }
+}
+
+
+// Maintenance mode: public pages are blocked, admin remains available.
+app.use(async (req, res, next) => {
+  if (req.path.startsWith("/api/admin") || req.path === "/admin.html" || req.path.startsWith("/api/auth") || req.path.startsWith("/api/analytics")) return next();
+  if (req.path === "/styles.css" || req.path === "/admin.js" || req.path === "/favicon.ico") return next();
+  try {
+    const st = await Settings.findOne({ key: "main" }).lean();
+    if (st?.maintenanceMode && !st?.maintenanceAllowUsers) {
+      if (req.path.startsWith("/api/")) return res.status(503).json({ error: st.maintenanceMessage || "Maintenance mode is enabled." });
+      return res.status(503).send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance</title><style>body{margin:0;background:#09090b;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh;padding:24px;text-align:center}.box{max-width:620px;padding:36px;border:1px solid #2a2a2e;border-radius:24px;background:#121215}h1{font-size:34px}p{color:#aaa;line-height:1.7}</style></head><body><div class="box"><h1>🛠️ Under Maintenance</h1><p>${String(st.maintenanceMessage || "We are updating the course platform. Please try again shortly.").replace(/[<>]/g,"")}</p></div></body></html>`);
+    }
+  } catch {}
+  next();
+});
 
 // ============================================================
 // RAZORPAY
@@ -1984,6 +2068,18 @@ app.get("/api/auth/me", requireUser, (req, res) => {
 });
 
 // ============================================================
+// STUDENT ADVANCED FEATURES
+// ============================================================
+app.get("/api/my-orders", requireUser, async (req,res)=>{try{res.json(await Order.find({customerEmail:req.user.email}).sort({createdAt:-1}).limit(200).lean())}catch(e){res.status(500).json({error:"Unable to load purchase history"})}});
+app.get("/api/my-notifications", requireUser, async (req,res)=>{try{const [n,reads]=await Promise.all([Notification.find({$or:[{audienceType:"all"},{audienceType:"student",audienceId:req.user.email},{audienceType:"batch",audienceId:{$in:(await BatchOwnership.find({ownerEmail:req.user.email}).distinct("appId")).map(String)}}]}).sort({createdAt:-1}).limit(100).lean(),NotificationRead.find({userEmail:req.user.email}).lean()]);const set=new Set(reads.map(x=>String(x.notificationId)));res.json(n.map(x=>({...x,read:set.has(String(x._id))})));}catch(e){res.status(500).json({error:"Unable to load notifications"})}});
+app.post("/api/my-notifications/:id/read", requireUser, async(req,res)=>{try{await NotificationRead.updateOne({notificationId:req.params.id,userEmail:req.user.email},{$set:{readAt:new Date()}},{upsert:true});res.json({success:true})}catch(e){res.status(500).json({error:"Unable to update notification"})}});
+app.put("/api/profile", requireUser, async(req,res)=>{try{const name=String(req.body.name||req.user.name).trim().slice(0,80);await User.updateOne({_id:req.user._id},{$set:{name}});res.json({success:true,name});}catch(e){res.status(500).json({error:"Unable to update profile"})}});
+app.get("/api/course/:appId", requireUser, async(req,res)=>{try{const own=await BatchOwnership.findOne({appId:req.params.appId,ownerEmail:req.user.email,active:true,expiresAt:{$gt:new Date()}});if(!own)return res.status(403).json({error:"Active batch access required"});const [batch,lessons,done]=await Promise.all([AppModel.findById(req.params.appId).lean(),CourseLesson.find({appId:req.params.appId,active:true}).sort({order:1}).lean(),Progress.find({appId:req.params.appId,userEmail:req.user.email}).lean()]);if(!batch)return res.status(404).json({error:"Batch not found"});const doneSet=new Set(done.filter(x=>x.completed).map(x=>String(x.lessonId)));res.json({batch,lessons:lessons.map(l=>({...l,completed:doneSet.has(String(l._id))})),progress:lessons.length?Math.round(doneSet.size/lessons.length*100):0});}catch(e){res.status(500).json({error:"Unable to load course"})}});
+app.post("/api/course/:appId/progress", requireUser, async(req,res)=>{try{const own=await BatchOwnership.findOne({appId:req.params.appId,ownerEmail:req.user.email,active:true,expiresAt:{$gt:new Date()}});if(!own)return res.status(403).json({error:"Active batch access required"});const lesson=await CourseLesson.findOne({_id:req.body.lessonId,appId:req.params.appId,active:true});if(!lesson)return res.status(404).json({error:"Lesson not found"});const completed=Boolean(req.body.completed);await Progress.findOneAndUpdate({userEmail:req.user.email,appId:req.params.appId,lessonId:lesson._id},{$set:{completed,lastWatchedAt:new Date()}},{upsert:true,new:true});const total=await CourseLesson.countDocuments({appId:req.params.appId,active:true});const done=await Progress.countDocuments({userEmail:req.user.email,appId:req.params.appId,completed:true});res.json({success:true,progress:total?Math.round(done/total*100):0});}catch(e){res.status(500).json({error:"Unable to save progress"})}});
+
+app.get("/api/my-batches/all", requireUser, async (req,res)=>{try{const rows=await BatchOwnership.find({ownerEmail:req.user.email}).populate("appId").sort({createdAt:-1}).lean();const now=new Date();res.json(rows.map(o=>({ownershipId:o._id,status:(o.active&&(!o.expiresAt||new Date(o.expiresAt)>now))?"active":"expired",expiresAt:o.expiresAt,purchasedAt:o.createdAt,batch:o.appId})));}catch(e){res.status(500).json({error:"Unable to load batches"})}});
+
+// ============================================================
 // MY BATCHES
 // ============================================================
 
@@ -2459,6 +2555,7 @@ app.get(
 
           tagline:
             "LEARN • PREPARE • SUCCEED"
+          ,maintenanceMode:false,maintenanceMessage:"We are updating the course platform. Please try again shortly.",maintenanceAllowUsers:false
         }
       );
     } catch {
@@ -4496,6 +4593,62 @@ app.get(
 );
 
 // ============================================================
+// ADVANCED ADMIN MANAGEMENT
+// ============================================================
+app.get("/api/admin/lessons", requireAdmin, async(req,res)=>{try{res.json(await CourseLesson.find().populate("appId","name").sort({appId:1,order:1}).lean())}catch(e){res.status(500).json({error:"Unable to load lessons"})}});
+app.post("/api/admin/lessons", requireAdmin, async(req,res)=>{try{const x=await CourseLesson.create({appId:req.body.appId,title:String(req.body.title||"").trim(),description:String(req.body.description||""),videoUrl:String(req.body.videoUrl||""),materialUrl:String(req.body.materialUrl||""),order:Number(req.body.order||0),active:req.body.active!==false});await writeAudit(req,"create_lesson","lesson",x._id,{title:x.title});res.json(x)}catch(e){res.status(400).json({error:e.message})}});
+app.put("/api/admin/lessons/:id", requireAdmin, async(req,res)=>{try{const x=await CourseLesson.findByIdAndUpdate(req.params.id,{$set:{title:req.body.title,description:req.body.description,videoUrl:req.body.videoUrl,materialUrl:req.body.materialUrl,order:Number(req.body.order||0),active:req.body.active!==false}},{new:true,runValidators:true});await writeAudit(req,"update_lesson","lesson",req.params.id);res.json(x)}catch(e){res.status(400).json({error:e.message})}});
+app.delete("/api/admin/lessons/:id", requireAdmin, async(req,res)=>{try{await CourseLesson.findByIdAndDelete(req.params.id);await Progress.deleteMany({lessonId:req.params.id});await writeAudit(req,"delete_lesson","lesson",req.params.id);res.json({success:true})}catch(e){res.status(500).json({error:"Unable to delete lesson"})}});
+app.get("/api/admin/coupons", requireAdmin, async(req,res)=>{try{res.json(await Coupon.find().sort({createdAt:-1}).lean())}catch(e){res.status(500).json({error:"Unable to load coupons"})}});
+app.post("/api/admin/coupons", requireAdmin, async(req,res)=>{try{const x=await Coupon.create({code:String(req.body.code||"").trim().toUpperCase(),type:req.body.type||"percent",value:Number(req.body.value||0),maxUses:Number(req.body.maxUses||0),minAmount:Number(req.body.minAmount||0),endAt:req.body.endAt||null});await writeAudit(req,"create_coupon","coupon",x._id,{code:x.code});res.json(x)}catch(e){res.status(400).json({error:e.code===11000?"Coupon already exists":e.message})}});
+app.delete("/api/admin/coupons/:id", requireAdmin, async(req,res)=>{try{await Coupon.findByIdAndDelete(req.params.id);await writeAudit(req,"delete_coupon","coupon",req.params.id);res.json({success:true})}catch(e){res.status(500).json({error:"Unable to delete coupon"})}});
+app.post("/api/admin/notifications", requireAdmin, async(req,res)=>{try{const n=await sendNotification(req.body.audienceType||"all",req.body.audienceId||"",String(req.body.title||"Notification").slice(0,160),String(req.body.message||"").slice(0,3000),req.body.type||"general");await writeAudit(req,"send_notification","notification",n?._id,{audience:req.body.audienceType});res.json(n)}catch(e){res.status(500).json({error:"Unable to send notification"})}});
+app.get("/api/admin/students", requireAdmin, async(req,res)=>{try{const q=String(req.query.q||"").trim();const users=await User.find(q?{$or:[{name:{$regex:q,$options:"i"}},{email:{$regex:q,$options:"i"}}]}:{}).select("name email createdAt updatedAt").sort({createdAt:-1}).limit(500).lean();const emails=users.map(u=>u.email);const owners=await BatchOwnership.find({ownerEmail:{$in:emails}}).populate("appId","name").lean();res.json(users.map(u=>({...u,batches:owners.filter(o=>o.ownerEmail===u.email).map(o=>({name:o.appId?.name,active:o.active,expiresAt:o.expiresAt}))})));}catch(e){res.status(500).json({error:"Unable to load students"})}});
+
+// ============================================================
+// ADVANCED ADMIN ANALYTICS / REPORTS
+// ============================================================
+app.get("/api/admin/advanced-analytics", requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const dayStart = new Date(now); dayStart.setHours(0,0,0,0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const liveSince = new Date(Date.now() - 45 * 1000);
+    const [users, activeUsers, totalOrders, paidOrders, todayPaid, monthPaid, liveVisitors, popular, gateways, registrations] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ updatedAt: { $gte: new Date(Date.now()-15*60*1000) } }),
+      Order.countDocuments(),
+      Order.countDocuments({status:"paid"}),
+      Order.find({status:"paid", createdAt:{$gte:dayStart}}).lean(),
+      Order.find({status:"paid", createdAt:{$gte:monthStart}}).lean(),
+      Visitor.countDocuments({lastSeen:{$gte:liveSince}}),
+      Order.aggregate([{ $match:{status:"paid"} },{ $group:{_id:"$appName", sales:{$sum:1}, revenue:{$sum:"$amount"}}},{ $sort:{sales:-1}},{ $limit:10}]),
+      Order.aggregate([{ $match:{status:"paid"} },{ $group:{_id:"$paymentGateway", sales:{$sum:1}, revenue:{$sum:"$amount"}}},{ $sort:{revenue:-1}}]),
+      User.countDocuments({createdAt:{$gte:dayStart}})
+    ]);
+    const sum = a => a.reduce((n,x)=>n+Number(x.amount||0),0);
+    res.json({ totalStudents:users, activeUsers, totalOrders, paidOrders, liveUsers:liveVisitors, newRegistrations:registrations, todaySales:todayPaid.length, todayRevenue:sum(todayPaid), monthlyRevenue:sum(monthPaid), totalRevenue:sum(await Order.find({status:"paid"}).select("amount").lean()), popularBatches:popular, gatewayStats:gateways });
+  } catch (e) { res.status(500).json({error:"Unable to load advanced analytics"}); }
+});
+
+app.get("/api/admin/gateway-report", requireAdmin, async (req,res)=>{
+  try {
+    const rows=await Order.aggregate([{ $group:{ _id:{gateway:"$paymentGateway",status:"$status"}, count:{$sum:1}, amount:{$sum:"$amount"}}},{ $sort:{"_id.gateway":1}}]);
+    const refunds=await Order.aggregate([{ $match:{refundStatus:{$in:["requested","refunded"]}}},{ $group:{_id:"$refundStatus",count:{$sum:1},amount:{$sum:"$refundAmount"}}}]);
+    res.json({rows, refunds});
+  } catch(e){res.status(500).json({error:"Unable to load gateway report"});}
+});
+
+app.get("/api/admin/audit-logs", requireAdmin, async (req,res)=>{ try { res.json(await AuditLog.find().sort({createdAt:-1}).limit(500).lean()); } catch(e){res.status(500).json({error:"Unable to load activity logs"});} });
+
+app.get("/api/admin/backup", requireAdmin, async (req,res)=>{
+  try {
+    const [apps,orders,users,owners,coupons,lessons,notifications]=await Promise.all([AppModel.find().lean(),Order.find().lean(),User.find().select("-passwordHash").lean(),BatchOwnership.find().lean(),Coupon.find().lean(),CourseLesson.find().lean(),Notification.find().lean()]);
+    res.setHeader("Content-Disposition",`attachment; filename=study-premium-backup-${new Date().toISOString().slice(0,10)}.json`); res.json({exportedAt:new Date(),apps,orders,users,owners,coupons,lessons,notifications});
+  } catch(e){res.status(500).json({error:"Backup failed"});}
+});
+
+// ============================================================
 // ADMIN CUSTOMERS
 // ============================================================
 
@@ -4591,6 +4744,10 @@ app.put(
             180
           );
 
+      const maintenanceMode = req.body.maintenanceMode === undefined ? undefined : Boolean(req.body.maintenanceMode);
+      const maintenanceAllowUsers = req.body.maintenanceAllowUsers === undefined ? undefined : Boolean(req.body.maintenanceAllowUsers);
+      const maintenanceMessage = req.body.maintenanceMessage === undefined ? undefined : String(req.body.maintenanceMessage || "").trim().slice(0,300);
+
       const settings =
         await Settings.findOneAndUpdate(
           {
@@ -4604,7 +4761,7 @@ app.put(
 
             title,
 
-            tagline
+            tagline, ...(maintenanceMode === undefined ? {} : {maintenanceMode}), ...(maintenanceAllowUsers === undefined ? {} : {maintenanceAllowUsers}), ...(maintenanceMessage === undefined ? {} : {maintenanceMessage})
           },
 
           {

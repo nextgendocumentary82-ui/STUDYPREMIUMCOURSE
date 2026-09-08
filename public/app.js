@@ -639,6 +639,25 @@ async function restorePurchasedAccess() {
    ACCESS CONTROL
 ========================================================= */
 
+function getActivePurchasePlans(app = currentApp) {
+  const plans = Array.isArray(app?.purchasePlans) ? app.purchasePlans.filter(p => p && p.active !== false) : [];
+  if (plans.length) return plans.map(p => ({ label: String(p.label || (Number(p.days) > 0 ? `${Number(p.days)} Days` : "Lifetime")), days: Number(p.days || 0), price: Number(p.price || 0) }));
+  return [{ label: String(app?.validity || "Lifetime"), days: 0, price: Number(app?.price || 0) }];
+}
+
+function selectedPurchasePlan() {
+  const plans = getActivePurchasePlans();
+  const selectedDays = Number(document.getElementById("purchasePlan")?.value || plans[0]?.days || 0);
+  return plans.find(p => Number(p.days) === selectedDays) || plans[0];
+}
+
+function refreshPayText() {
+  if (!currentApp) return;
+  const plan = selectedPurchasePlan();
+  const payText = document.getElementById("payText");
+  if (payText && plan) payText.textContent = `Pay ${money(plan.price)} for ${currentApp.name} — ${plan.label}.`;
+}
+
 function handleAccess(type) {
 
   if (!currentApp) {
@@ -648,8 +667,8 @@ function handleAccess(type) {
 
   accessType = type;
 
-  const price =
-    Number(currentApp.price || 0);
+  const plans = getActivePurchasePlans(currentApp);
+  const hasPaidPlan = plans.some(p => Number(p.price) > 0);
 
   /*
     FREE
@@ -659,7 +678,7 @@ function handleAccess(type) {
 
   if (
     currentApp.accessType !== "paid" ||
-    price <= 0
+    !hasPaidPlan
   ) {
 
     openDestination(type);
@@ -673,14 +692,13 @@ function handleAccess(type) {
     Payment modal
   */
 
-  const payText =
-    document.getElementById("payText");
-
-  if (payText) {
-
-    payText.textContent =
-      `Pay ${money(price)} for ${currentApp.name} (${currentApp.validity || "Lifetime"}).`;
+  const planSelect = document.getElementById("purchasePlan");
+  if (planSelect) {
+    const plans = getActivePurchasePlans(currentApp);
+    planSelect.innerHTML = plans.map(p => `<option value="${Number(p.days || 0)}">${esc(p.label)} — ${money(p.price)}</option>`).join("");
+    planSelect.onchange = refreshPayText;
   }
+  refreshPayText();
 
   const modal =
     document.getElementById("payModal");
@@ -766,16 +784,19 @@ async function startPayment() {
   }
 
 
+  const plan = selectedPurchasePlan();
+  if (!plan) { toast("Please select a valid plan."); return; }
+
   const selectedGateway =
     document.getElementById("paymentGateway")?.value || "cashfree";
 
   if (selectedGateway === "cashfree") {
-    await startCashfreePayment({ name, email, phone });
+    await startCashfreePayment({ name, email, phone, durationDays: plan.days });
     return;
   }
 
   if (selectedGateway === "upi_qr") {
-    await startUpiQrPayment({ name, email, phone });
+    await startUpiQrPayment({ name, email, phone, durationDays: plan.days });
     return;
   }
 
@@ -816,7 +837,8 @@ async function startPayment() {
 
             customerEmail: email,
 
-            customerPhone: phone
+            customerPhone: phone,
+            durationDays: plan.days
 
           })
         }
@@ -953,27 +975,9 @@ async function startPayment() {
               const result = await check.json();
 
               if (result.success && result.status === "paid") {
-                toast("Payment confirmed. Creating secure access...");
-                const accessResponse = await fetch("/api/access/create", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    orderId: result.orderId,
-                    type: accessType
-                  })
-                });
-
-                const accessResult = await accessResponse.json();
-
-                if (!accessResponse.ok || !accessResult.success) {
-                  throw new Error(accessResult.error || "Could not create secure access.");
-                }
-
                 closePay();
-                toast("Payment verified. Opening access...");
-                setTimeout(() => {
-                  window.location.href = accessResult.url;
-                }, 700);
+                toast("✅ Payment confirmed. Waiting for admin to grant your selected batch access.");
+                setTimeout(() => { window.location.href = "/account.html"; }, 900);
                 return;
               }
 
@@ -1021,7 +1025,7 @@ async function startPayment() {
 
 let activeQrOrderId = "";
 
-async function startUpiQrPayment({ name, email, phone }) {
+async function startUpiQrPayment({ name, email, phone, durationDays }) {
   const payButton = document.getElementById("payButton");
   if (!phone) {
     toast("Please enter your mobile number.");
@@ -1041,7 +1045,8 @@ async function startUpiQrPayment({ name, email, phone }) {
         appId: currentApp._id,
         customerName: name,
         customerEmail: email,
-        customerPhone: phone
+        customerPhone: phone,
+        durationDays
       })
     });
 
@@ -1108,9 +1113,9 @@ async function submitUpiQrPayment() {
     }
 
     document.getElementById("qrPayText").textContent =
-      "Reference submitted. Access will unlock automatically only after the admin verifies the real transaction in the UPI/bank account.";
+      "Reference submitted. Admin will first verify the real UPI transaction, then grant your selected batch duration.";
     if (button) button.textContent = "Verification Pending";
-    toast("Payment reference submitted. Please wait for verification.");
+    toast("Payment reference submitted. Please wait for payment verification and admin access approval.");
   } catch (error) {
     console.error("UPI QR submit error:", error);
     toast(error.message || "Could not submit payment reference.");
@@ -1125,7 +1130,7 @@ async function submitUpiQrPayment() {
    CASHFREE PAYMENT
 ========================================================= */
 
-async function startCashfreePayment({ name, email, phone }) {
+async function startCashfreePayment({ name, email, phone, durationDays }) {
   const payButton = document.getElementById("payButton");
 
   if (!phone) {
@@ -1150,7 +1155,8 @@ async function startCashfreePayment({ name, email, phone }) {
         appId: currentApp._id,
         customerName: name,
         customerEmail: email,
-        customerPhone: phone
+        customerPhone: phone,
+        durationDays
       })
     });
 
@@ -1188,25 +1194,9 @@ async function startCashfreePayment({ name, email, phone }) {
       const verified = await verifyResponse.json();
 
       if (verifyResponse.ok && verified.success && verified.status === "paid") {
-        const accessResponse = await fetch("/api/access/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderId: verified.orderId,
-            type: accessType
-          })
-        });
-
-        const accessResult = await accessResponse.json();
-        if (!accessResponse.ok || !accessResult.success) {
-          throw new Error(accessResult.error || "Could not create secure access.");
-        }
-
         closePay();
-        toast("Payment verified. Opening access...");
-        setTimeout(() => {
-          window.location.href = accessResult.url;
-        }, 700);
+        toast("✅ Payment verified. Waiting for admin to grant your selected batch access.");
+        setTimeout(() => { window.location.href = "/account.html"; }, 900);
         return;
       }
 
@@ -1249,29 +1239,9 @@ async function verifyPayment(payment) {
       throw new Error(result.error || "Payment verification failed.");
     }
 
-    // A fresh one-time token is created only after server-side
-    // Razorpay signature verification succeeds.
-    const accessResponse = await fetch("/api/access/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orderId: result.orderId,
-        type: accessType
-      })
-    });
-
-    const accessResult = await accessResponse.json();
-
-    if (!accessResponse.ok || !accessResult.success) {
-      throw new Error(accessResult.error || "Could not create secure access.");
-    }
-
     closePay();
-    toast("Payment verified. Opening access...");
-
-    setTimeout(() => {
-      window.location.href = accessResult.url;
-    }, 700);
+    toast("✅ Payment verified. Waiting for admin to grant your selected batch access.");
+    setTimeout(() => { window.location.href = "/account.html"; }, 900);
 
   } catch (error) {
     console.error("Payment verification error:", error);

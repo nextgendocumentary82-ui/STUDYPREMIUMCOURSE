@@ -2,7 +2,7 @@ async function approveQrOrder(orderId) {
   if (!confirm("Have you verified the exact payment amount and transaction reference in your UPI/bank account?")) return;
   try {
     await api(`/api/admin/orders/${encodeURIComponent(orderId)}/upi-qr/approve`, { method: "POST" });
-    alert("QR payment verified and access unlocked.");
+    alert("QR payment verified. Ab student ko access duration select karke Grant Access kare.");
     await refreshAdmin();
   } catch (error) {
     alert(error.message || "Could not approve QR payment.");
@@ -569,6 +569,16 @@ function renderApps(apps) {
 }
 
 
+function parsePurchasePlans(text) {
+  return String(text || "").split("\n").map(line => line.trim()).filter(Boolean).map(line => {
+    const [labelRaw, daysRaw, priceRaw] = line.split("|").map(x => String(x || "").trim());
+    const days = Number(daysRaw);
+    const price = Number(priceRaw);
+    if (!labelRaw || !Number.isFinite(days) || days < 0 || !Number.isFinite(price) || price < 0) return null;
+    return { label: labelRaw, days: Math.round(days), price, active: true };
+  }).filter(Boolean);
+}
+
 /* =========================================================
    SAVE APP / COURSE
 ========================================================= */
@@ -651,6 +661,7 @@ async function saveApp() {
       appFileMime,
       appFileSize,
       validity: val("fValidity").trim() || "Lifetime",
+      purchasePlans: parsePurchasePlans(val("fPlans")),
       rating: Number(val("fRating") || 4.8),
       description: val("fDescription").trim(),
       screenshots,
@@ -770,6 +781,7 @@ function editApp(id) {
     "fValidity",
     app.validity
   );
+  setv("fPlans", (app.purchasePlans || []).map(p => `${p.label}|${Number(p.days || 0)}|${Number(p.price || 0)}`).join("\n"));
 
   setv(
     "fRating",
@@ -862,7 +874,7 @@ function clearForm() {
     "editId","fName","fDeveloper","fCategory","fPrice",
     "fLogo","fLogoKey","fBanner","fBannerKey","fWebsite",
     "fDownload","fAppFileKey","fAppFileName","fAppFileMime",
-    "fAppFileSize","fScreenshotKeys","fValidity","fRating",
+    "fAppFileSize","fScreenshotKeys","fValidity","fPlans","fRating",
     "fDescription","fScreenshots"
   ].forEach(id => setv(id, ""));
 
@@ -983,125 +995,92 @@ async function saveWebsiteSettings() {
    PAYMENTS
 ========================================================= */
 
+async function grantBatchAccess(orderId, suggestedDays = 0) {
+  const raw = prompt("Access days enter kare (0 = Lifetime):", String(Number(suggestedDays || 0)));
+  if (raw === null) return;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days < 0 || days > 36500) return alert("Valid days enter kare. 0 = Lifetime.");
+  try {
+    await api(`/api/admin/orders/${encodeURIComponent(orderId)}/access/grant`, {
+      method: "POST", body: JSON.stringify({ days })
+    });
+    alert(days === 0 ? "Lifetime access granted." : `${days} days access granted.`);
+    await refreshAdmin();
+  } catch (e) { alert(e.message || "Could not grant access."); }
+}
+
+async function editBatchAccess(orderId, currentDays = 0) {
+  const raw = prompt("New access days enter kare (0 = Lifetime):", String(Number(currentDays || 0)));
+  if (raw === null) return;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days < 0 || days > 36500) return alert("Valid days enter kare. 0 = Lifetime.");
+  try {
+    await api(`/api/admin/orders/${encodeURIComponent(orderId)}/access/edit`, {
+      method: "POST", body: JSON.stringify({ days, fromNow: true })
+    });
+    alert("Access updated successfully.");
+    await refreshAdmin();
+  } catch (e) { alert(e.message || "Could not edit access."); }
+}
+
+async function removeBatchAccess(orderId) {
+  if (!confirm("Is student ka batch access remove karna hai? Payment record delete nahi hoga.")) return;
+  try {
+    await api(`/api/admin/orders/${encodeURIComponent(orderId)}/access/remove`, { method: "POST" });
+    alert("Batch access removed.");
+    await refreshAdmin();
+  } catch (e) { alert(e.message || "Could not remove access."); }
+}
+
 function renderOrders(orders) {
-
-  const container =
-    document.getElementById(
-      "orders"
-    );
-
+  const container = document.getElementById("orders");
   if (!container) return;
-
-
   if (!orders.length) {
-
-    container.innerHTML =
-      `<p class="loading">
-        No payments yet.
-      </p>`;
-
+    container.innerHTML = `<p class="loading">No payments yet.</p>`;
     return;
   }
 
+  container.innerHTML = orders.map(order => {
+    const status = String(order.status || "").toLowerCase();
+    const date = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "—";
+    const ownership = order.ownership || null;
+    const accessStatus = String(ownership?.accessStatus || order.accessStatus || (status === "paid" ? "pending_admin" : "—"));
+    const durationDays = Number(ownership?.durationDays ?? order.durationDays ?? 0);
+    const planLabel = String(order.planLabel || ownership?.planLabel || (durationDays > 0 ? `${durationDays} Days` : "Lifetime"));
+    const expiry = ownership?.expiresAt ? new Date(ownership.expiresAt).toLocaleString("en-IN") : "Lifetime";
 
-  container.innerHTML =
-    orders.map(order => {
+    let accessButtons = "";
+    if (status === "paid") {
+      if (!ownership || accessStatus === "pending_admin") {
+        accessButtons = `<button class="primary" onclick="grantBatchAccess('${order._id}', ${Number(order.durationDays || 0)})">🔓 Grant ${esc(planLabel)} Access</button>`;
+      } else if (accessStatus === "active") {
+        accessButtons = `
+          <button class="primary" onclick="editBatchAccess('${order._id}', ${durationDays})">✏️ Edit Access</button>
+          <button class="danger" onclick="removeBatchAccess('${order._id}')">🗑 Remove Access</button>`;
+      } else {
+        accessButtons = `<button class="primary" onclick="grantBatchAccess('${order._id}', ${durationDays || Number(order.durationDays || 0)})">↩ Restore / Grant Access</button>`;
+      }
+    }
 
-      const status =
-        String(order.status || "")
-          .toLowerCase();
+    return `<div class="order">
+      <b>${esc(order.appName || "Unknown")}</b> — <strong>${money(order.amount)}</strong> — <strong>${esc(status.toUpperCase())}</strong><br>
+      <span>Name: ${esc(order.customerName || "—")} • Email: ${esc(order.customerEmail || "—")} • Mobile: ${esc(order.customerPhone || "—")}</span><br>
+      <span>Selected Plan: <b>${esc(planLabel)}</b> • Gateway: ${esc(order.paymentGateway || "razorpay")} • Payment ID: ${esc(order.cashfreePaymentId || order.razorpayPaymentId || order.upiReference || "—")}</span><br>
+      <span>Access: <b>${esc(accessStatus.toUpperCase())}</b>${ownership && accessStatus === "active" ? ` • Expires: ${esc(expiry)}` : ""}</span>
 
-
-      const date =
-        order.createdAt
-          ? new Date(
-            order.createdAt
-          ).toLocaleString("en-IN")
-          : "—";
-
-
-      return `
-
-        <div class="order">
-
-          <b>
-            ${esc(order.appName || "Unknown")}
-          </b>
-
-          —
-          <strong>
-            ${money(order.amount)}
-          </strong>
-
-          —
-          <strong>
-            ${esc(status.toUpperCase())}
-          </strong>
-
-
-          <br>
-
-
-          <span>
-
-            Name:
-            ${esc(order.customerName || "—")}
-
-            •
-
-            Email:
-            ${esc(order.customerEmail || "—")}
-
-            •
-
-            Mobile:
-            ${esc(order.customerPhone || "—")}
-
-          </span>
-
-
-          <br>
-
-
-          <span>
-
-            Gateway:
-            ${esc(order.paymentGateway || "razorpay")}
-
-            •
-
-            Payment ID:
-            ${esc(order.cashfreePaymentId || order.razorpayPaymentId || order.upiReference || "—")}
-
-            •
-
-            Order ID:
-            ${esc(order.cashfreeOrderId || order.razorpayOrderId || order.upiOrderId || "—")}
-
-          </span>
-
-
-          <br>
-
-          ${String(order.paymentGateway || "").toLowerCase() === "upi_qr" && status === "pending_verification" ? `
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-              <button class="primary" onclick="approveQrOrder('${order._id}')">✓ Verify & Approve</button>
-              <button class="secondary" onclick="rejectQrOrder('${order._id}')">Reject</button>
-            </div>
-            <small style="display:block;margin-top:8px">Verify the exact amount and reference in your UPI/bank account before approving.</small>
-          ` : ""}
-
-          <span>
-            ${esc(date)}
-          </span>
-
+      ${String(order.paymentGateway || "").toLowerCase() === "upi_qr" && status === "pending_verification" ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="primary" onclick="approveQrOrder('${order._id}')">✓ Verify Payment</button>
+          <button class="secondary" onclick="rejectQrOrder('${order._id}')">Reject</button>
         </div>
+        <small style="display:block;margin-top:8px">Verify the exact amount and reference in your UPI/bank account before approving.</small>
+      ` : ""}
 
-      `;
-
-    }).join("");
+      ${accessButtons ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${accessButtons}</div>` : ""}
+      <span>${esc(date)}</span>
+    </div>`;
+  }).join("");
 }
-
 
 /* =========================================================
    CUSTOMER TABLE / LIST
@@ -1312,25 +1291,3 @@ if (token) {
   showPanel();
 
 }
-/* =========================================================
-   ADVANCED CENTER
-========================================================= */
-function showAdvTab(name,btn){
-  document.querySelectorAll('.adv-view').forEach(x=>x.classList.add('hidden'));
-  const el=document.getElementById('adv-'+name); if(el) el.classList.remove('hidden');
-  document.querySelectorAll('.adv-tab').forEach(x=>x.classList.remove('active')); if(btn) btn.classList.add('active');
-  if(name==='analytics')loadAdvancedAnalytics(); if(name==='students')loadStudents(); if(name==='course')loadLessons(); if(name==='gateway')loadGatewayReport(); if(name==='activity')loadAudit(); if(name==='maintenance')loadMaintenance();
-}
-function fmt(n){return Number(n||0).toLocaleString('en-IN')}
-async function loadAdvancedAnalytics(){try{const d=await api('/api/admin/advanced-analytics');document.getElementById('advancedStats').innerHTML=`<div class="stat"><small>👨‍🎓 Total Students</small><b>${fmt(d.totalStudents)}</b></div><div class="stat"><small>🟢 Active Users</small><b>${fmt(d.activeUsers)}</b></div><div class="stat"><small>⚡ Live Users</small><b>${fmt(d.liveUsers)}</b></div><div class="stat"><small>🆕 New Today</small><b>${fmt(d.newRegistrations)}</b></div><div class="stat"><small>💰 Today Sales</small><b>${money(d.todayRevenue)}</b></div><div class="stat"><small>📅 Monthly Revenue</small><b>${money(d.monthlyRevenue)}</b></div><div class="stat"><small>🏦 Total Revenue</small><b>${money(d.totalRevenue)}</b></div><div class="stat"><small>🧾 Paid Orders</small><b>${fmt(d.paidOrders)}</b></div>`;document.getElementById('popularBatches').innerHTML=(d.popularBatches||[]).map((x,i)=>`<div class="report-row"><b>#${i+1} ${esc(x._id||'Batch')}</b><span>${fmt(x.sales)} sales • ${money(x.revenue)}</span></div>`).join('')||'<p class="small-muted">No paid sales yet.</p>';document.getElementById('gatewayMini').innerHTML=(d.gatewayStats||[]).map(x=>`<div class="report-row"><b>${esc(x._id||'unknown')}</b><span>${fmt(x.sales)} • ${money(x.revenue)}</span></div>`).join('')||'<p class="small-muted">No gateway data.</p>'}catch(e){console.error(e)}}
-let studentTimer;function debouncedStudents(){clearTimeout(studentTimer);studentTimer=setTimeout(loadStudents,300)}
-async function loadStudents(){try{const d=await api('/api/admin/students?q='+encodeURIComponent(val('studentSearch')));document.getElementById('studentRows').innerHTML=d.map(s=>`<div class="student-row"><div><b>${esc(s.name)}</b><div class="small-muted">${esc(s.email)} • Joined ${new Date(s.createdAt).toLocaleDateString()}</div><div class="student-badges">${(s.batches||[]).map(b=>`<span class="status-pill">${esc(b.name||'Batch')} · ${b.active?'Active':'Expired'}</span>`).join(' ')||'<span class="small-muted">No batch</span>'}</div></div></div>`).join('')||'<p class="small-muted">No students found.</p>'}catch(e){toast(e.message)}}
-async function loadLessons(){try{const apps=await api('/api/admin/apps');document.getElementById('lessonApp').innerHTML=apps.map(a=>`<option value="${a._id}">${esc(a.name)}</option>`).join('');const d=await api('/api/admin/lessons');document.getElementById('lessonRows').innerHTML=d.map(x=>`<div class="report-row"><div><b>${esc(x.title)}</b><div class="small-muted">${esc(x.appId?.name||'Batch')} • order ${x.order}</div></div><button onclick="deleteLesson('${x._id}')">Delete</button></div>`).join('')||'<p class="small-muted">No lessons yet.</p>'}catch(e){toast(e.message)}}
-async function createLesson(){try{await api('/api/admin/lessons',{method:'POST',body:JSON.stringify({appId:val('lessonApp'),title:val('lessonTitle'),videoUrl:val('lessonVideo'),materialUrl:val('lessonMaterial'),order:Number(val('lessonOrder')||0),description:val('lessonDesc')})});['lessonTitle','lessonVideo','lessonMaterial','lessonOrder','lessonDesc'].forEach(id=>setv(id,''));toast('Lesson added');loadLessons()}catch(e){toast(e.message)}}
-async function deleteLesson(id){if(!confirm('Delete this lesson?'))return;try{await api('/api/admin/lessons/'+id,{method:'DELETE'});loadLessons()}catch(e){toast(e.message)}}
-async function loadGatewayReport(){try{const d=await api('/api/admin/gateway-report');const rows=d.rows||[];document.getElementById('gatewayReport').innerHTML=`<table class="admin-table"><thead><tr><th>Gateway</th><th>Status</th><th>Orders</th><th>Amount</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x._id.gateway)}</td><td>${esc(x._id.status)}</td><td>${fmt(x.count)}</td><td>${money(x.amount)}</td></tr>`).join('')}</tbody></table><h3>Refund Summary</h3>${(d.refunds||[]).map(x=>`<div class="report-row"><b>${esc(x._id)}</b><span>${fmt(x.count)} • ${money(x.amount)}</span></div>`).join('')||'<p class="small-muted">No refunds.</p>'}`}catch(e){toast(e.message)}}
-async function sendAdminNotification(){try{await api('/api/admin/notifications',{method:'POST',body:JSON.stringify({audienceType:val('notifyAudience'),audienceId:val('notifyAudienceId'),title:val('notifyTitle'),message:val('notifyMessage')})});toast('Notification sent');setv('notifyTitle','');setv('notifyMessage','')}catch(e){toast(e.message)}}
-async function loadMaintenance(){try{const d=await api('/api/admin/settings');document.getElementById('maintenanceMode').checked=!!d.maintenanceMode;document.getElementById('maintenanceAllowUsers').checked=!!d.maintenanceAllowUsers;setv('maintenanceMessage',d.maintenanceMessage||'We are updating the course platform. Please try again shortly.')}catch(e){console.error(e)}}
-async function saveMaintenance(){try{await api('/api/admin/settings',{method:'PUT',body:JSON.stringify({title:val('siteTitle')||'STUDY PREMIUM COURSE',tagline:val('siteTagline')||'LEARN • PREPARE • SUCCEED',maintenanceMode:checked('maintenanceMode'),maintenanceAllowUsers:checked('maintenanceAllowUsers'),maintenanceMessage:val('maintenanceMessage')})});toast('Maintenance settings saved')}catch(e){toast(e.message)}}
-async function downloadBackup(){try{const r=await fetch('/api/admin/backup',{headers:{Authorization:'Bearer '+token}});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||'Backup failed');const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='study-premium-backup.json';a.click();URL.revokeObjectURL(a.href)}catch(e){toast(e.message)}}
-async function loadAudit(){try{const d=await api('/api/admin/audit-logs');document.getElementById('auditRows').innerHTML=d.map(x=>`<div class="report-row"><div><b>${esc(x.action)}</b><div class="small-muted">${esc(x.admin)} • ${esc(x.entityType)} ${esc(x.entityId)}</div></div><span>${new Date(x.createdAt).toLocaleString()}</span></div>`).join('')||'<p class="small-muted">No activity yet.</p>'}catch(e){toast(e.message)}}

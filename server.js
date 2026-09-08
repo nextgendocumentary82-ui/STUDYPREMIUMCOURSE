@@ -110,18 +110,7 @@ app.post(
             if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
             order.status = "paid";
             await order.save();
-            await BatchOwnership.findOneAndUpdate(
-              { orderId: order._id },
-              { $set: {
-                appId: order.appId,
-                ownerEmail: normalizeEmail(order.customerEmail),
-                orderId: order._id,
-                active: true,
-                durationMonths: Number(order.durationMonths || 0),
-                expiresAt: makeOwnershipExpiry(null, order)
-              } },
-              { upsert: true, new: true, setDefaultsOnInsert: true }
-            );
+            await ensurePendingOwnership(order);
           }
 
           const donation = await DonationPayment.findOne({ razorpayOrderId });
@@ -243,20 +232,7 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true,
-              durationMonths: Number(order.durationMonths || 0),
-              expiresAt: makeOwnershipExpiry(null, order)
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await ensurePendingOwnership(order);
       }
 
       if (
@@ -1084,6 +1060,16 @@ const appSchema =
         min: 0
       },
 
+      purchasePlans: {
+        type: [{
+          label: { type: String, required: true, trim: true },
+          days: { type: Number, min: 0, max: 36500, required: true },
+          price: { type: Number, min: 0, required: true },
+          active: { type: Boolean, default: true }
+        }],
+        default: []
+      },
+
       websiteUrl: {
         type: String,
         default: ""
@@ -1262,6 +1248,28 @@ const orderSchema =
         max: 120
       },
 
+      durationDays: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 36500
+      },
+
+      planLabel: {
+        type: String,
+        default: ""
+      },
+
+      accessStatus: {
+        type: String,
+        enum: ["pending_admin", "granted", "removed", "expired"],
+        default: "pending_admin"
+      },
+
+      accessGrantedAt: { type: Date, default: null },
+      accessRemovedAt: { type: Date, default: null },
+      accessExpiresAt: { type: Date, default: null },
+
       customerName: {
         type: String,
         default: ""
@@ -1371,11 +1379,7 @@ const settingsSchema =
         type: String,
         default:
           "LEARN • PREPARE • SUCCEED"
-      },
-      maintenanceMode: { type: Boolean, default: false },
-      maintenanceMessage: { type: String, default: "We are updating the course platform. Please try again shortly." },
-      maintenanceAllowUsers: { type: Boolean, default: false },
-      notificationEmail: { type: Boolean, default: false }
+      }
     },
     {
       timestamps: true
@@ -1418,10 +1422,15 @@ const userSchema = new mongoose.Schema({
 const batchOwnershipSchema = new mongoose.Schema({
   appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true },
   ownerEmail: { type: String, required: true, lowercase: true, trim: true, index: true },
-  orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
-  active: { type: Boolean, default: true },
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true, unique: true },
+  active: { type: Boolean, default: false },
+  accessStatus: { type: String, enum: ["pending_admin", "active", "removed", "expired"], default: "pending_admin", index: true },
   durationMonths: { type: Number, default: 0 },
+  durationDays: { type: Number, default: 0 },
+  planLabel: { type: String, default: "" },
+  grantedAt: { type: Date, default: null },
   expiresAt: { type: Date, default: null, index: true },
+  removedAt: { type: Date, default: null },
   donatedAt: { type: Date, default: null }
 }, { timestamps: true });
 
@@ -1487,86 +1496,6 @@ const Settings =
     "Settings",
     settingsSchema
   );
-
-// ============================================================
-// ADVANCED ANALYTICS / COURSE PROGRESS / NOTIFICATIONS
-// ============================================================
-const couponSchema = new mongoose.Schema({
-  code:{type:String,required:true,unique:true,uppercase:true,trim:true}, type:{type:String,enum:["percent","fixed"],default:"percent"}, value:{type:Number,min:0,required:true}, maxUses:{type:Number,default:0}, usedCount:{type:Number,default:0}, minAmount:{type:Number,default:0}, startAt:{type:Date,default:null}, endAt:{type:Date,default:null}, active:{type:Boolean,default:true}
-},{timestamps:true});
-const Coupon = mongoose.model("Coupon", couponSchema);
-
-const courseLessonSchema = new mongoose.Schema({
-  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true, index: true },
-  title: { type: String, required: true, trim: true, maxlength: 180 },
-  description: { type: String, default: "", maxlength: 2000 },
-  videoUrl: { type: String, default: "" },
-  materialUrl: { type: String, default: "" },
-  order: { type: Number, default: 0 },
-  active: { type: Boolean, default: true }
-}, { timestamps: true });
-const CourseLesson = mongoose.model("CourseLesson", courseLessonSchema);
-
-const progressSchema = new mongoose.Schema({
-  userEmail: { type: String, required: true, lowercase: true, index: true },
-  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true, index: true },
-  lessonId: { type: mongoose.Schema.Types.ObjectId, ref: "CourseLesson", required: true },
-  completed: { type: Boolean, default: false },
-  lastWatchedAt: { type: Date, default: Date.now }
-}, { timestamps: true });
-progressSchema.index({ userEmail: 1, appId: 1, lessonId: 1 }, { unique: true });
-const Progress = mongoose.model("Progress", progressSchema);
-
-const notificationSchema = new mongoose.Schema({
-  audienceType: { type: String, enum: ["all", "batch", "student"], required: true },
-  audienceId: { type: String, default: "" },
-  title: { type: String, required: true, maxlength: 160 },
-  message: { type: String, required: true, maxlength: 3000 },
-  type: { type: String, default: "general" },
-  eventKey: { type: String, default: "", index: true },
-  createdBy: { type: String, default: "admin" }
-}, { timestamps: true });
-const Notification = mongoose.model("Notification", notificationSchema);
-
-const notificationReadSchema = new mongoose.Schema({
-  notificationId: { type: mongoose.Schema.Types.ObjectId, ref: "Notification", required: true },
-  userEmail: { type: String, required: true, lowercase: true, index: true },
-  readAt: { type: Date, default: Date.now }
-}, { timestamps: true });
-notificationReadSchema.index({ notificationId: 1, userEmail: 1 }, { unique: true });
-const NotificationRead = mongoose.model("NotificationRead", notificationReadSchema);
-
-const auditLogSchema = new mongoose.Schema({
-  admin: { type: String, default: "admin" },
-  action: { type: String, required: true },
-  entityType: { type: String, default: "system" },
-  entityId: { type: String, default: "" },
-  meta: { type: mongoose.Schema.Types.Mixed, default: {} }
-}, { timestamps: true });
-const AuditLog = mongoose.model("AuditLog", auditLogSchema);
-
-async function writeAudit(req, action, entityType="system", entityId="", meta={}) {
-  try { await AuditLog.create({ admin: req.admin?.username || "admin", action, entityType, entityId: String(entityId || ""), meta }); } catch (e) { console.error("AUDIT LOG ERROR", e.message); }
-}
-
-async function sendNotification(audienceType, audienceId, title, message, type="general", eventKey="") {
-  try { return await Notification.create({ audienceType, audienceId: String(audienceId || ""), title, message, type, eventKey }); } catch (e) { console.error("NOTIFICATION ERROR", e.message); return null; }
-}
-
-
-// Maintenance mode: public pages are blocked, admin remains available.
-app.use(async (req, res, next) => {
-  if (req.path.startsWith("/api/admin") || req.path === "/admin.html" || req.path.startsWith("/api/auth") || req.path.startsWith("/api/analytics")) return next();
-  if (req.path === "/styles.css" || req.path === "/admin.js" || req.path === "/favicon.ico") return next();
-  try {
-    const st = await Settings.findOne({ key: "main" }).lean();
-    if (st?.maintenanceMode && !st?.maintenanceAllowUsers) {
-      if (req.path.startsWith("/api/")) return res.status(503).json({ error: st.maintenanceMessage || "Maintenance mode is enabled." });
-      return res.status(503).send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance</title><style>body{margin:0;background:#09090b;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh;padding:24px;text-align:center}.box{max-width:620px;padding:36px;border:1px solid #2a2a2e;border-radius:24px;background:#121215}h1{font-size:34px}p{color:#aaa;line-height:1.7}</style></head><body><div class="box"><h1>🛠️ Under Maintenance</h1><p>${String(st.maintenanceMessage || "We are updating the course platform. Please try again shortly.").replace(/[<>]/g,"")}</p></div></body></html>`);
-    }
-  } catch {}
-  next();
-});
 
 // ============================================================
 // RAZORPAY
@@ -1721,14 +1650,50 @@ function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "").slice(-10);
 }
 
-function makeOwnershipExpiry(app, order) {
+function makeOwnershipExpiry(app, order, fromDate = new Date()) {
+  const days = Number(order?.durationDays || 0);
+  if (days > 0) return new Date(new Date(fromDate).getTime() + days * 24 * 60 * 60 * 1000);
   const months = Number(order?.durationMonths || 0);
   if (months > 0) {
-    const d = new Date();
+    const d = new Date(fromDate);
     d.setMonth(d.getMonth() + months);
     return d;
   }
   return null;
+}
+
+function resolvePurchasePlan(item, requestedDays) {
+  const plans = Array.isArray(item?.purchasePlans)
+    ? item.purchasePlans.filter(p => p && p.active !== false && Number(p.price) >= 0)
+    : [];
+  if (plans.length) {
+    const days = Number(requestedDays);
+    const plan = plans.find(p => Number(p.days) === days);
+    if (!plan) throw new Error("Please select a valid purchase plan.");
+    return { label: String(plan.label || (days > 0 ? `${days} Days` : "Lifetime")), days, price: Number(plan.price) };
+  }
+  return { label: String(item?.validity || "Lifetime"), days: 0, price: Number(item?.price || 0) };
+}
+
+async function ensurePendingOwnership(order) {
+  if (!order || order.status !== "paid") return null;
+  return BatchOwnership.findOneAndUpdate(
+    { orderId: order._id },
+    { $setOnInsert: {
+        appId: order.appId,
+        ownerEmail: normalizeEmail(order.customerEmail),
+        orderId: order._id,
+        active: false,
+        accessStatus: "pending_admin",
+        durationMonths: Number(order.durationMonths || 0),
+        durationDays: Number(order.durationDays || 0),
+        planLabel: String(order.planLabel || ""),
+        expiresAt: null
+      },
+      $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail) }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
 }
 
 async function sendDonationOtp(recipientEmail, otp, donorName, batchName) {
@@ -1790,8 +1755,17 @@ function validHttpUrl(value) {
 }
 
 function normalizeAppBody(body) {
-  const price =
-    Number(body.price || 0);
+  const normalizedPlans = Array.isArray(body.purchasePlans)
+    ? body.purchasePlans.map(p => ({
+        label: String(p?.label || "").trim(),
+        days: Math.max(0, Math.min(36500, Math.round(Number(p?.days || 0)))),
+        price: Math.max(0, Number(p?.price || 0)),
+        active: p?.active !== false
+      })).filter(p => p.label && Number.isFinite(p.days) && Number.isFinite(p.price))
+    : [];
+  const requestedPrice = Number(body.price || 0);
+  const paidPlanPrices = normalizedPlans.filter(p => p.active && p.price > 0).map(p => p.price);
+  const price = requestedPrice > 0 ? requestedPrice : (paidPlanPrices.length ? Math.min(...paidPlanPrices) : 0);
 
   return {
     name:
@@ -1855,6 +1829,8 @@ function normalizeAppBody(body) {
 
     price,
 
+    purchasePlans: normalizedPlans,
+
     websiteUrl:
       String(
         body.websiteUrl || ""
@@ -1886,7 +1862,7 @@ function normalizeAppBody(body) {
       ),
 
     accessType:
-      price > 0
+      (price > 0 || paidPlanPrices.length > 0)
         ? "paid"
         : "free",
 
@@ -2068,45 +2044,41 @@ app.get("/api/auth/me", requireUser, (req, res) => {
 });
 
 // ============================================================
-// STUDENT ADVANCED FEATURES
-// ============================================================
-app.get("/api/my-orders", requireUser, async (req,res)=>{try{res.json(await Order.find({customerEmail:req.user.email}).sort({createdAt:-1}).limit(200).lean())}catch(e){res.status(500).json({error:"Unable to load purchase history"})}});
-app.get("/api/my-notifications", requireUser, async (req,res)=>{try{const [n,reads]=await Promise.all([Notification.find({$or:[{audienceType:"all"},{audienceType:"student",audienceId:req.user.email},{audienceType:"batch",audienceId:{$in:(await BatchOwnership.find({ownerEmail:req.user.email}).distinct("appId")).map(String)}}]}).sort({createdAt:-1}).limit(100).lean(),NotificationRead.find({userEmail:req.user.email}).lean()]);const set=new Set(reads.map(x=>String(x.notificationId)));res.json(n.map(x=>({...x,read:set.has(String(x._id))})));}catch(e){res.status(500).json({error:"Unable to load notifications"})}});
-app.post("/api/my-notifications/:id/read", requireUser, async(req,res)=>{try{await NotificationRead.updateOne({notificationId:req.params.id,userEmail:req.user.email},{$set:{readAt:new Date()}},{upsert:true});res.json({success:true})}catch(e){res.status(500).json({error:"Unable to update notification"})}});
-app.put("/api/profile", requireUser, async(req,res)=>{try{const name=String(req.body.name||req.user.name).trim().slice(0,80);await User.updateOne({_id:req.user._id},{$set:{name}});res.json({success:true,name});}catch(e){res.status(500).json({error:"Unable to update profile"})}});
-app.get("/api/course/:appId", requireUser, async(req,res)=>{try{const own=await BatchOwnership.findOne({appId:req.params.appId,ownerEmail:req.user.email,active:true,expiresAt:{$gt:new Date()}});if(!own)return res.status(403).json({error:"Active batch access required"});const [batch,lessons,done]=await Promise.all([AppModel.findById(req.params.appId).lean(),CourseLesson.find({appId:req.params.appId,active:true}).sort({order:1}).lean(),Progress.find({appId:req.params.appId,userEmail:req.user.email}).lean()]);if(!batch)return res.status(404).json({error:"Batch not found"});const doneSet=new Set(done.filter(x=>x.completed).map(x=>String(x.lessonId)));res.json({batch,lessons:lessons.map(l=>({...l,completed:doneSet.has(String(l._id))})),progress:lessons.length?Math.round(doneSet.size/lessons.length*100):0});}catch(e){res.status(500).json({error:"Unable to load course"})}});
-app.post("/api/course/:appId/progress", requireUser, async(req,res)=>{try{const own=await BatchOwnership.findOne({appId:req.params.appId,ownerEmail:req.user.email,active:true,expiresAt:{$gt:new Date()}});if(!own)return res.status(403).json({error:"Active batch access required"});const lesson=await CourseLesson.findOne({_id:req.body.lessonId,appId:req.params.appId,active:true});if(!lesson)return res.status(404).json({error:"Lesson not found"});const completed=Boolean(req.body.completed);await Progress.findOneAndUpdate({userEmail:req.user.email,appId:req.params.appId,lessonId:lesson._id},{$set:{completed,lastWatchedAt:new Date()}},{upsert:true,new:true});const total=await CourseLesson.countDocuments({appId:req.params.appId,active:true});const done=await Progress.countDocuments({userEmail:req.user.email,appId:req.params.appId,completed:true});res.json({success:true,progress:total?Math.round(done/total*100):0});}catch(e){res.status(500).json({error:"Unable to save progress"})}});
-
-app.get("/api/my-batches/all", requireUser, async (req,res)=>{try{const rows=await BatchOwnership.find({ownerEmail:req.user.email}).populate("appId").sort({createdAt:-1}).lean();const now=new Date();res.json(rows.map(o=>({ownershipId:o._id,status:(o.active&&(!o.expiresAt||new Date(o.expiresAt)>now))?"active":"expired",expiresAt:o.expiresAt,purchasedAt:o.createdAt,batch:o.appId})));}catch(e){res.status(500).json({error:"Unable to load batches"})}});
-
-// ============================================================
 // MY BATCHES
 // ============================================================
 
 app.get("/api/my-batches", requireUser, async (req, res) => {
   try {
-    const ownerships = await BatchOwnership.find({ ownerEmail: req.user.email, active: true })
+    const ownerships = await BatchOwnership.find({ ownerEmail: req.user.email })
       .populate("appId")
-      .sort({ createdAt: -1 })
-      .lean();
+      .populate("orderId", "status amount paymentGateway planLabel durationDays createdAt")
+      .sort({ createdAt: -1 });
 
     const now = new Date();
-    const valid = [];
+    const result = [];
     for (const o of ownerships) {
-      if (o.expiresAt && new Date(o.expiresAt) <= now) {
-        await BatchOwnership.updateOne({ _id: o._id }, { $set: { active: false } });
-        continue;
+      if (o.active && o.expiresAt && new Date(o.expiresAt) <= now) {
+        o.active = false;
+        o.accessStatus = "expired";
+        await o.save();
+        await Order.updateOne({ _id: o.orderId?._id || o.orderId }, { $set: { accessStatus: "expired" } });
       }
-      valid.push({
+      result.push({
         ownershipId: o._id,
         purchasedAt: o.createdAt,
         donatedAt: o.donatedAt,
+        grantedAt: o.grantedAt,
         expiresAt: o.expiresAt,
+        durationDays: o.durationDays || 0,
         durationMonths: o.durationMonths || 0,
+        planLabel: o.planLabel || o.orderId?.planLabel || "",
+        accessStatus: o.accessStatus || (o.active ? "active" : "pending_admin"),
+        active: !!o.active,
+        paymentStatus: o.orderId?.status || "unknown",
         batch: o.appId
       });
     }
-    res.json(valid);
+    res.json(result);
   } catch (error) {
     console.error("MY BATCHES ERROR:", error);
     res.status(500).json({ error: "Unable to load your batches." });
@@ -2118,10 +2090,10 @@ app.post("/api/my-batches/access", requireUser, async (req, res) => {
     const ownership = await BatchOwnership.findOne({
       _id: req.body.ownershipId,
       ownerEmail: req.user.email,
-      active: true
     }).populate("appId").populate("orderId");
 
     if (!ownership) return res.status(404).json({ error: "Batch access not found. Please purchase/restore access again." });
+    if (!ownership.active || ownership.accessStatus !== "active") return res.status(403).json({ error: ownership.accessStatus === "pending_admin" ? "Payment verified. Waiting for admin to grant batch access." : "Batch access is not active." });
     if (ownership.expiresAt && new Date(ownership.expiresAt) <= new Date()) {
       ownership.active = false;
       await ownership.save();
@@ -2555,7 +2527,6 @@ app.get(
 
           tagline:
             "LEARN • PREPARE • SUCCEED"
-          ,maintenanceMode:false,maintenanceMessage:"We are updating the course platform. Please try again shortly.",maintenanceAllowUsers:false
         }
       );
     } catch {
@@ -2667,7 +2638,8 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = ""
+        customerPhone = "",
+        durationDays = null
       } = req.body;
 
       if (!appId) {
@@ -2710,8 +2682,7 @@ app.post(
 
       if (
         item.accessType !==
-        "paid" ||
-        item.price <= 0
+        "paid"
       ) {
         return res.status(400).json({
           error:
@@ -2729,10 +2700,10 @@ app.post(
         });
       }
 
-      const amount =
-        Math.round(
-          item.price * 100
-        );
+      const selectedPlan = resolvePurchasePlan(item, durationDays);
+      if (selectedPlan.price <= 0) return res.status(400).json({ error: "Selected plan is free." });
+
+      const amount = Math.round(selectedPlan.price * 100);
 
       const razorpayOrder =
         await rp.orders.create({
@@ -2759,7 +2730,10 @@ app.post(
           item.name,
 
         amount:
-          item.price,
+          selectedPlan.price,
+
+        durationDays: selectedPlan.days,
+        planLabel: selectedPlan.label,
 
         currency:
           "INR",
@@ -2801,7 +2775,7 @@ app.post(
             item.name,
 
           validity:
-            item.validity
+            selectedPlan.label
         }
       });
     } catch (error) {
@@ -2831,7 +2805,8 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = ""
+        customerPhone = "",
+        durationDays = null
       } = req.body;
 
       if (!appId) return res.status(400).json({ error: "App ID is required" });
@@ -2846,16 +2821,16 @@ app.post(
 
       const item = await AppModel.findOne({ _id: appId, published: true });
       if (!item) return res.status(404).json({ error: "App not found" });
-      if (item.accessType !== "paid" || item.price <= 0) {
-        return res.status(400).json({ error: "This item is free" });
-      }
+      if (item.accessType !== "paid") return res.status(400).json({ error: "This item is free" });
+      const selectedPlan = resolvePurchasePlan(item, durationDays);
+      if (selectedPlan.price <= 0) return res.status(400).json({ error: "Selected plan is free" });
 
       const localOrderId = `spc_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
       const publicUrl = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
 
       const orderBody = {
         order_id: localOrderId,
-        order_amount: Number(item.price.toFixed(2)),
+        order_amount: Number(selectedPlan.price.toFixed(2)),
         order_currency: "INR",
         customer_details: {
           customer_id: `cust_${crypto.createHash("sha256").update(String(customerEmail).toLowerCase()).digest("hex").slice(0, 20)}`,
@@ -2888,7 +2863,9 @@ app.post(
         cashfreeCfOrderId: String(cashfreeOrder.cf_order_id || ""),
         appId: item._id,
         appName: item.name,
-        amount: item.price,
+        amount: selectedPlan.price,
+        durationDays: selectedPlan.days,
+        planLabel: selectedPlan.label,
         currency: "INR",
         status: "created",
         customerName: String(customerName).trim(),
@@ -2903,7 +2880,9 @@ app.post(
         dbOrderId: dbOrder._id,
         paymentSessionId: cashfreeOrder.payment_session_id,
         mode: cf.environment,
-        amount: item.price,
+        amount: selectedPlan.price,
+        planLabel: selectedPlan.label,
+        durationDays: selectedPlan.days,
         currency: "INR"
       });
     } catch (error) {
@@ -2941,20 +2920,7 @@ app.post(
         order.cashfreeCfOrderId = String(cashfreeOrder.cf_order_id || order.cashfreeCfOrderId || "");
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true,
-              durationMonths: Number(order.durationMonths || 0),
-              expiresAt: makeOwnershipExpiry(null, order)
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await ensurePendingOwnership(order);
 
         return res.json({
           success: true,
@@ -2995,7 +2961,7 @@ app.post(
 
 app.post("/api/payments/upi-qr/order", async (req, res) => {
   try {
-    const { appId, customerName = "", customerEmail = "", customerPhone = "" } = req.body;
+    const { appId, customerName = "", customerEmail = "", customerPhone = "", durationDays = null } = req.body;
 
     if (!appId) return res.status(400).json({ error: "App ID is required" });
     if (!String(customerName).trim()) return res.status(400).json({ error: "Customer name is required" });
@@ -3004,9 +2970,9 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
 
     const item = await AppModel.findOne({ _id: appId, published: true });
     if (!item) return res.status(404).json({ error: "App not found" });
-    if (item.accessType !== "paid" || Number(item.price) <= 0) {
-      return res.status(400).json({ error: "This item is free" });
-    }
+    if (item.accessType !== "paid") return res.status(400).json({ error: "This item is free" });
+    const selectedPlan = resolvePurchasePlan(item, durationDays);
+    if (selectedPlan.price <= 0) return res.status(400).json({ error: "Selected plan is free" });
 
     const upiOrderId = `upi_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
     const order = await Order.create({
@@ -3014,7 +2980,9 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
       upiOrderId,
       appId: item._id,
       appName: item.name,
-      amount: item.price,
+      amount: selectedPlan.price,
+      durationDays: selectedPlan.days,
+      planLabel: selectedPlan.label,
       currency: "INR",
       status: "created",
       customerName: String(customerName).trim().slice(0, 100),
@@ -3026,10 +2994,12 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
       success: true,
       orderId: upiOrderId,
       dbOrderId: order._id,
-      amount: item.price,
+      amount: selectedPlan.price,
+      planLabel: selectedPlan.label,
+      durationDays: selectedPlan.days,
       currency: "INR",
       qrUrl: "/qr-payment.jpeg",
-      message: "Scan the QR and pay the exact amount. Access will be unlocked only after admin verifies the transaction."
+      message: "Scan the QR and pay the exact amount. Payment will be marked verified only after admin checks the transaction; batch access is then granted by admin with the selected duration."
     });
   } catch (error) {
     console.error("CREATE UPI QR ORDER ERROR:", error);
@@ -3130,18 +3100,7 @@ app.post(
       order.status = "paid";
       await order.save();
 
-      await BatchOwnership.findOneAndUpdate(
-        { orderId: order._id },
-        { $set: {
-                appId: order.appId,
-                ownerEmail: normalizeEmail(order.customerEmail),
-                orderId: order._id,
-                active: true,
-                durationMonths: Number(order.durationMonths || 0),
-                expiresAt: makeOwnershipExpiry(null, order)
-              } },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+      await ensurePendingOwnership(order);
 
       const item = await AppModel.findById(order.appId).lean();
       if (!item) return res.status(404).json({ error: "Purchased item no longer exists" });
@@ -3198,18 +3157,7 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          { $set: {
-                appId: order.appId,
-                ownerEmail: normalizeEmail(order.customerEmail),
-                orderId: order._id,
-                active: true,
-                durationMonths: Number(order.durationMonths || 0),
-                expiresAt: makeOwnershipExpiry(null, order)
-              } },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await ensurePendingOwnership(order);
 
         return res.json({ success: true, status: "paid", orderId: order._id, paymentId });
       }
@@ -3330,6 +3278,19 @@ app.post(
         });
       }
 
+      const ownership = await BatchOwnership.findOne({ orderId: order._id });
+      if (!ownership || !ownership.active || ownership.accessStatus !== "active") {
+        return res.status(403).json({ error: "Payment verified. Waiting for admin to grant batch access." });
+      }
+      if (ownership.expiresAt && new Date(ownership.expiresAt) <= new Date()) {
+        ownership.active = false;
+        ownership.accessStatus = "expired";
+        await ownership.save();
+        order.accessStatus = "expired";
+        await order.save();
+        return res.status(403).json({ error: "This batch access has expired." });
+      }
+
       const token =
         createAccessToken();
 
@@ -3350,7 +3311,7 @@ app.post(
         });
       }
 
-      const expiresAt = makeOwnershipExpiry(item, order) ||
+      const expiresAt = ownership.expiresAt ||
         new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
 
       // Course batches usually open their website. If the requested app
@@ -4359,18 +4320,11 @@ app.get(
   requireAdmin,
   async (req, res) => {
     try {
-      const orders =
-        await Order.find()
-          .sort({
-            createdAt:
-              -1
-          })
-          .limit(500)
-          .lean();
-
-      res.json(
-        orders
-      );
+      const orders = await Order.find().sort({ createdAt: -1 }).limit(500).lean();
+      const ids = orders.map(o => o._id);
+      const ownerships = await BatchOwnership.find({ orderId: { $in: ids } }).lean();
+      const byOrder = new Map(ownerships.map(o => [String(o.orderId), o]));
+      res.json(orders.map(order => ({ ...order, ownership: byOrder.get(String(order._id)) || null })));
     } catch {
       res.status(500).json({
         error:
@@ -4397,20 +4351,7 @@ app.post("/api/admin/orders/:id/upi-qr/approve", requireAdmin, async (req, res) 
     order.upiVerifiedAt = new Date();
     await order.save();
 
-    await BatchOwnership.findOneAndUpdate(
-      { orderId: order._id },
-      {
-        $set: {
-          appId: order.appId,
-          ownerEmail: normalizeEmail(order.customerEmail),
-          orderId: order._id,
-          active: true,
-          durationMonths: Number(order.durationMonths || 0),
-          expiresAt: makeOwnershipExpiry(null, order)
-        }
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    await ensurePendingOwnership(order);
 
     return res.json({ success: true, status: "paid", orderId: order._id });
   } catch (error) {
@@ -4435,6 +4376,120 @@ app.post("/api/admin/orders/:id/upi-qr/reject", requireAdmin, async (req, res) =
   }
 });
 
+
+// ============================================================
+// ADMIN STUDENT / BATCH ACCESS MANAGEMENT
+// Payment being PAID does not itself unlock a batch. Admin controls access.
+// ============================================================
+
+app.get("/api/admin/access", requireAdmin, async (req, res) => {
+  try {
+    const rows = await BatchOwnership.find()
+      .populate("appId", "name category validity purchasePlans websiteUrl")
+      .populate("orderId", "amount status customerName customerEmail customerPhone paymentGateway planLabel durationDays createdAt")
+      .sort({ updatedAt: -1 })
+      .limit(1000)
+      .lean();
+    res.json(rows);
+  } catch (error) {
+    console.error("ADMIN ACCESS LIST ERROR:", error);
+    res.status(500).json({ error: "Unable to load student access." });
+  }
+});
+
+app.post("/api/admin/orders/:id/access/grant", requireAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found." });
+    if (order.status !== "paid") return res.status(400).json({ error: "Payment must be PAID before access can be granted." });
+
+    let days = Number(req.body?.days);
+    if (!Number.isFinite(days) || days < 0 || days > 36500) {
+      days = Number(order.durationDays || 0);
+    }
+    const now = new Date();
+    const expiresAt = days > 0 ? new Date(now.getTime() + days * 86400000) : null;
+    const ownership = await BatchOwnership.findOneAndUpdate(
+      { orderId: order._id },
+      { $set: {
+        appId: order.appId,
+        ownerEmail: normalizeEmail(order.customerEmail),
+        orderId: order._id,
+        active: true,
+        accessStatus: "active",
+        durationDays: days,
+        durationMonths: 0,
+        planLabel: String(req.body?.label || order.planLabel || (days > 0 ? `${days} Days` : "Lifetime")),
+        grantedAt: now,
+        removedAt: null,
+        expiresAt
+      } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    order.accessStatus = "granted";
+    order.accessGrantedAt = now;
+    order.accessRemovedAt = null;
+    order.accessExpiresAt = expiresAt;
+    await order.save();
+    res.json({ success: true, ownership });
+  } catch (error) {
+    console.error("GRANT ACCESS ERROR:", error);
+    res.status(500).json({ error: "Could not grant batch access." });
+  }
+});
+
+app.post("/api/admin/orders/:id/access/edit", requireAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found." });
+    const ownership = await BatchOwnership.findOne({ orderId: order._id });
+    if (!ownership) return res.status(404).json({ error: "Access record not found. Grant access first." });
+
+    const days = Number(req.body?.days);
+    if (!Number.isFinite(days) || days < 0 || days > 36500) return res.status(400).json({ error: "Days must be between 0 and 36500. Use 0 for Lifetime." });
+    const start = req.body?.fromNow === false && ownership.grantedAt ? new Date(ownership.grantedAt) : new Date();
+    ownership.durationDays = days;
+    ownership.durationMonths = 0;
+    ownership.planLabel = String(req.body?.label || (days > 0 ? `${days} Days` : "Lifetime"));
+    ownership.grantedAt = start;
+    ownership.expiresAt = days > 0 ? new Date(start.getTime() + days * 86400000) : null;
+    ownership.active = true;
+    ownership.accessStatus = "active";
+    ownership.removedAt = null;
+    await ownership.save();
+
+    order.accessStatus = "granted";
+    order.accessGrantedAt = start;
+    order.accessRemovedAt = null;
+    order.accessExpiresAt = ownership.expiresAt;
+    await order.save();
+    res.json({ success: true, ownership });
+  } catch (error) {
+    console.error("EDIT ACCESS ERROR:", error);
+    res.status(500).json({ error: "Could not edit batch access." });
+  }
+});
+
+app.post("/api/admin/orders/:id/access/remove", requireAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found." });
+    const ownership = await BatchOwnership.findOne({ orderId: order._id });
+    if (!ownership) return res.status(404).json({ error: "Access record not found." });
+    ownership.active = false;
+    ownership.accessStatus = "removed";
+    ownership.removedAt = new Date();
+    await ownership.save();
+    order.accessStatus = "removed";
+    order.accessRemovedAt = ownership.removedAt;
+    await order.save();
+    await Access.deleteMany({ orderId: order._id });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("REMOVE ACCESS ERROR:", error);
+    res.status(500).json({ error: "Could not remove batch access." });
+  }
+});
 
 // ============================================================
 // PUBLIC LIVE VISITOR HEARTBEAT
@@ -4593,62 +4648,6 @@ app.get(
 );
 
 // ============================================================
-// ADVANCED ADMIN MANAGEMENT
-// ============================================================
-app.get("/api/admin/lessons", requireAdmin, async(req,res)=>{try{res.json(await CourseLesson.find().populate("appId","name").sort({appId:1,order:1}).lean())}catch(e){res.status(500).json({error:"Unable to load lessons"})}});
-app.post("/api/admin/lessons", requireAdmin, async(req,res)=>{try{const x=await CourseLesson.create({appId:req.body.appId,title:String(req.body.title||"").trim(),description:String(req.body.description||""),videoUrl:String(req.body.videoUrl||""),materialUrl:String(req.body.materialUrl||""),order:Number(req.body.order||0),active:req.body.active!==false});await writeAudit(req,"create_lesson","lesson",x._id,{title:x.title});res.json(x)}catch(e){res.status(400).json({error:e.message})}});
-app.put("/api/admin/lessons/:id", requireAdmin, async(req,res)=>{try{const x=await CourseLesson.findByIdAndUpdate(req.params.id,{$set:{title:req.body.title,description:req.body.description,videoUrl:req.body.videoUrl,materialUrl:req.body.materialUrl,order:Number(req.body.order||0),active:req.body.active!==false}},{new:true,runValidators:true});await writeAudit(req,"update_lesson","lesson",req.params.id);res.json(x)}catch(e){res.status(400).json({error:e.message})}});
-app.delete("/api/admin/lessons/:id", requireAdmin, async(req,res)=>{try{await CourseLesson.findByIdAndDelete(req.params.id);await Progress.deleteMany({lessonId:req.params.id});await writeAudit(req,"delete_lesson","lesson",req.params.id);res.json({success:true})}catch(e){res.status(500).json({error:"Unable to delete lesson"})}});
-app.get("/api/admin/coupons", requireAdmin, async(req,res)=>{try{res.json(await Coupon.find().sort({createdAt:-1}).lean())}catch(e){res.status(500).json({error:"Unable to load coupons"})}});
-app.post("/api/admin/coupons", requireAdmin, async(req,res)=>{try{const x=await Coupon.create({code:String(req.body.code||"").trim().toUpperCase(),type:req.body.type||"percent",value:Number(req.body.value||0),maxUses:Number(req.body.maxUses||0),minAmount:Number(req.body.minAmount||0),endAt:req.body.endAt||null});await writeAudit(req,"create_coupon","coupon",x._id,{code:x.code});res.json(x)}catch(e){res.status(400).json({error:e.code===11000?"Coupon already exists":e.message})}});
-app.delete("/api/admin/coupons/:id", requireAdmin, async(req,res)=>{try{await Coupon.findByIdAndDelete(req.params.id);await writeAudit(req,"delete_coupon","coupon",req.params.id);res.json({success:true})}catch(e){res.status(500).json({error:"Unable to delete coupon"})}});
-app.post("/api/admin/notifications", requireAdmin, async(req,res)=>{try{const n=await sendNotification(req.body.audienceType||"all",req.body.audienceId||"",String(req.body.title||"Notification").slice(0,160),String(req.body.message||"").slice(0,3000),req.body.type||"general");await writeAudit(req,"send_notification","notification",n?._id,{audience:req.body.audienceType});res.json(n)}catch(e){res.status(500).json({error:"Unable to send notification"})}});
-app.get("/api/admin/students", requireAdmin, async(req,res)=>{try{const q=String(req.query.q||"").trim();const users=await User.find(q?{$or:[{name:{$regex:q,$options:"i"}},{email:{$regex:q,$options:"i"}}]}:{}).select("name email createdAt updatedAt").sort({createdAt:-1}).limit(500).lean();const emails=users.map(u=>u.email);const owners=await BatchOwnership.find({ownerEmail:{$in:emails}}).populate("appId","name").lean();res.json(users.map(u=>({...u,batches:owners.filter(o=>o.ownerEmail===u.email).map(o=>({name:o.appId?.name,active:o.active,expiresAt:o.expiresAt}))})));}catch(e){res.status(500).json({error:"Unable to load students"})}});
-
-// ============================================================
-// ADVANCED ADMIN ANALYTICS / REPORTS
-// ============================================================
-app.get("/api/admin/advanced-analytics", requireAdmin, async (req, res) => {
-  try {
-    const now = new Date();
-    const dayStart = new Date(now); dayStart.setHours(0,0,0,0);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const liveSince = new Date(Date.now() - 45 * 1000);
-    const [users, activeUsers, totalOrders, paidOrders, todayPaid, monthPaid, liveVisitors, popular, gateways, registrations] = await Promise.all([
-      User.countDocuments(),
-      User.countDocuments({ updatedAt: { $gte: new Date(Date.now()-15*60*1000) } }),
-      Order.countDocuments(),
-      Order.countDocuments({status:"paid"}),
-      Order.find({status:"paid", createdAt:{$gte:dayStart}}).lean(),
-      Order.find({status:"paid", createdAt:{$gte:monthStart}}).lean(),
-      Visitor.countDocuments({lastSeen:{$gte:liveSince}}),
-      Order.aggregate([{ $match:{status:"paid"} },{ $group:{_id:"$appName", sales:{$sum:1}, revenue:{$sum:"$amount"}}},{ $sort:{sales:-1}},{ $limit:10}]),
-      Order.aggregate([{ $match:{status:"paid"} },{ $group:{_id:"$paymentGateway", sales:{$sum:1}, revenue:{$sum:"$amount"}}},{ $sort:{revenue:-1}}]),
-      User.countDocuments({createdAt:{$gte:dayStart}})
-    ]);
-    const sum = a => a.reduce((n,x)=>n+Number(x.amount||0),0);
-    res.json({ totalStudents:users, activeUsers, totalOrders, paidOrders, liveUsers:liveVisitors, newRegistrations:registrations, todaySales:todayPaid.length, todayRevenue:sum(todayPaid), monthlyRevenue:sum(monthPaid), totalRevenue:sum(await Order.find({status:"paid"}).select("amount").lean()), popularBatches:popular, gatewayStats:gateways });
-  } catch (e) { res.status(500).json({error:"Unable to load advanced analytics"}); }
-});
-
-app.get("/api/admin/gateway-report", requireAdmin, async (req,res)=>{
-  try {
-    const rows=await Order.aggregate([{ $group:{ _id:{gateway:"$paymentGateway",status:"$status"}, count:{$sum:1}, amount:{$sum:"$amount"}}},{ $sort:{"_id.gateway":1}}]);
-    const refunds=await Order.aggregate([{ $match:{refundStatus:{$in:["requested","refunded"]}}},{ $group:{_id:"$refundStatus",count:{$sum:1},amount:{$sum:"$refundAmount"}}}]);
-    res.json({rows, refunds});
-  } catch(e){res.status(500).json({error:"Unable to load gateway report"});}
-});
-
-app.get("/api/admin/audit-logs", requireAdmin, async (req,res)=>{ try { res.json(await AuditLog.find().sort({createdAt:-1}).limit(500).lean()); } catch(e){res.status(500).json({error:"Unable to load activity logs"});} });
-
-app.get("/api/admin/backup", requireAdmin, async (req,res)=>{
-  try {
-    const [apps,orders,users,owners,coupons,lessons,notifications]=await Promise.all([AppModel.find().lean(),Order.find().lean(),User.find().select("-passwordHash").lean(),BatchOwnership.find().lean(),Coupon.find().lean(),CourseLesson.find().lean(),Notification.find().lean()]);
-    res.setHeader("Content-Disposition",`attachment; filename=study-premium-backup-${new Date().toISOString().slice(0,10)}.json`); res.json({exportedAt:new Date(),apps,orders,users,owners,coupons,lessons,notifications});
-  } catch(e){res.status(500).json({error:"Backup failed"});}
-});
-
-// ============================================================
 // ADMIN CUSTOMERS
 // ============================================================
 
@@ -4660,7 +4659,7 @@ app.get(
       const customers =
         await Order.find()
           .select(
-            "appName amount status customerName customerEmail customerPhone paymentGateway razorpayPaymentId razorpayOrderId cashfreePaymentId cashfreeOrderId createdAt"
+            "appName amount status customerName customerEmail customerPhone paymentGateway razorpayPaymentId razorpayOrderId cashfreePaymentId cashfreeOrderId planLabel durationDays accessStatus accessExpiresAt createdAt"
           )
           .sort({
             createdAt:
@@ -4744,10 +4743,6 @@ app.put(
             180
           );
 
-      const maintenanceMode = req.body.maintenanceMode === undefined ? undefined : Boolean(req.body.maintenanceMode);
-      const maintenanceAllowUsers = req.body.maintenanceAllowUsers === undefined ? undefined : Boolean(req.body.maintenanceAllowUsers);
-      const maintenanceMessage = req.body.maintenanceMessage === undefined ? undefined : String(req.body.maintenanceMessage || "").trim().slice(0,300);
-
       const settings =
         await Settings.findOneAndUpdate(
           {
@@ -4761,7 +4756,7 @@ app.put(
 
             title,
 
-            tagline, ...(maintenanceMode === undefined ? {} : {maintenanceMode}), ...(maintenanceAllowUsers === undefined ? {} : {maintenanceAllowUsers}), ...(maintenanceMessage === undefined ? {} : {maintenanceMessage})
+            tagline
           },
 
           {
@@ -5114,6 +5109,14 @@ async function startServer() {
 
     console.log(
       "MongoDB connected"
+    );
+
+    // Backward compatibility: purchases created by older versions were
+    // already active but had no explicit accessStatus field. Keep those
+    // students active instead of turning them into pending requests.
+    await BatchOwnership.updateMany(
+      { active: true, accessStatus: { $exists: false } },
+      { $set: { accessStatus: "active" } }
     );
 
     await ensureAdmin();

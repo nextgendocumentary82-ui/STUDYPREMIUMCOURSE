@@ -108,9 +108,14 @@ app.post(
           const order = await Order.findOne({ razorpayOrderId });
           if (order) {
             if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
-            order.status = "paid";
+            order.status = "pending_admin";
             await order.save();
-            await BatchOwnership.findOneAndUpdate(
+            /* Access is created only after explicit admin approval. */
+            /* BatchOwnership intentionally NOT created here. */
+            /* approval route below creates it and starts the expiry clock. */
+            await Promise.resolve();
+            /* removed automatic ownership creation */
+            /* await BatchOwnership.findOneAndUpdate(
               { orderId: order._id },
               { $set: {
                 appId: order.appId,
@@ -121,7 +126,7 @@ app.post(
                 expiresAt: makeOwnershipExpiry(null, order)
               } },
               { upsert: true, new: true, setDefaultsOnInsert: true }
-            );
+            ); */
           }
 
           const donation = await DonationPayment.findOne({ razorpayOrderId });
@@ -240,23 +245,9 @@ app.post(
 
       if (type === "PAYMENT_SUCCESS_WEBHOOK" && paymentStatus === "SUCCESS") {
         order.cashfreePaymentId = cashfreePaymentId;
-        order.status = "paid";
+        order.status = "pending_admin";
         await order.save();
-
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true,
-              durationMonths: Number(order.durationMonths || 0),
-              expiresAt: makeOwnershipExpiry(null, order)
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        // Access is intentionally NOT created until admin approval.
       }
 
       if (
@@ -2857,6 +2848,8 @@ app.post(
     try {
       const {
         appId,
+        planId = "",
+        durationDays = 0,
         customerName = "",
         customerEmail = "",
         customerPhone = ""
@@ -2969,28 +2962,15 @@ app.post(
       // Never trust the browser callback alone. Access is granted only
       // after Cashfree's server reports the order as PAID.
       if (status === "PAID") {
-        order.status = "paid";
+        order.status = "pending_admin";
         order.cashfreeCfOrderId = String(cashfreeOrder.cf_order_id || order.cashfreeCfOrderId || "");
         await order.save();
 
-        await BatchOwnership.findOneAndUpdate(
-          { orderId: order._id },
-          {
-            $set: {
-              appId: order.appId,
-              ownerEmail: normalizeEmail(order.customerEmail),
-              orderId: order._id,
-              active: true,
-              durationMonths: Number(order.durationMonths || 0),
-              expiresAt: makeOwnershipExpiry(null, order)
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
         return res.json({
           success: true,
-          status: "paid",
+          status: "pending_admin",
+          pendingApproval: true,
+          message: "Payment confirmed. Waiting for admin approval before access is activated.",
           orderId: order._id,
           cashfreeOrderId
         });
@@ -3163,28 +3143,17 @@ app.post(
       }
 
       order.razorpayPaymentId = razorpay_payment_id;
-      order.status = "paid";
+      order.status = "pending_admin";
       await order.save();
-
-      await BatchOwnership.findOneAndUpdate(
-        { orderId: order._id },
-        { $set: {
-                appId: order.appId,
-                ownerEmail: normalizeEmail(order.customerEmail),
-                orderId: order._id,
-                active: true,
-                durationMonths: Number(order.durationMonths || 0),
-                expiresAt: makeOwnershipExpiry(null, order)
-              } },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
 
       const item = await AppModel.findById(order.appId).lean();
       if (!item) return res.status(404).json({ error: "Purchased item no longer exists" });
 
       return res.json({
         success: true,
-        status: "paid",
+        status: "pending_admin",
+        pendingApproval: true,
+        message: "Payment verified. Waiting for admin approval before access is activated.",
         orderId: order._id,
         paymentId: razorpay_payment_id,
         app: {
@@ -3268,6 +3237,17 @@ app.post(
 );
 
 // ============================================================
+// AUTO EXPIRE BATCH ACCESS
+async function expireBatchOwnerships() {
+  const now = new Date();
+  await BatchOwnership.updateMany(
+    { active: true, expiresAt: { $ne: null, $lte: now } },
+    { $set: { active: false } }
+  );
+}
+
+setInterval(() => { expireBatchOwnerships().catch(() => {}); }, 60 * 1000);
+
 // ALREADY PURCHASED / RESTORE ACCESS
 // Works after Razorpay, Cashfree or admin-approved UPI QR payment.
 // The customer must provide the same email + mobile used for payment.
@@ -3353,17 +3333,20 @@ app.post(
         });
       }
 
-      const order =
-        await Order.findOne({
-          _id: orderId,
-          status: "paid"
-        });
-
+      const order = await Order.findOne({ _id: orderId, status: "paid" });
       if (!order) {
-        return res.status(403).json({
-          error:
-            "Paid order required"
-        });
+        return res.status(403).json({ error: "Admin approval required before access is activated." });
+      }
+      const ownership = await BatchOwnership.findOne({
+        orderId: order._id,
+        ownerEmail: normalizeEmail(order.customerEmail),
+        active: true
+      });
+      if (!ownership || (ownership.expiresAt && new Date(ownership.expiresAt) <= new Date())) {
+        if (ownership && ownership.expiresAt && new Date(ownership.expiresAt) <= new Date()) {
+          ownership.active = false; await ownership.save();
+        }
+        return res.status(403).json({ error: "Batch access is not active or has expired." });
       }
 
       const token =
@@ -4417,6 +4400,27 @@ app.get(
 );
 
 // ============================================================
+// ADMIN PAYMENT APPROVAL (Razorpay / Cashfree / UPI QR)
+app.post("/api/admin/orders/:id/approve", requireAdmin, async (req,res)=>{
+  try {
+    const order=await Order.findById(req.params.id);
+    if(!order) return res.status(404).json({error:"Order not found"});
+    if(!["pending_admin","pending_verification"].includes(order.status)) return res.status(400).json({error:"Order is not waiting for approval"});
+    order.status="paid";
+    if(order.paymentGateway==="upi_qr") order.upiVerifiedAt=new Date();
+    await order.save();
+    const days=Number(order.durationDays||0);
+    const expiresAt=days>0 ? new Date(Date.now()+days*86400000) : null;
+    const own=await BatchOwnership.findOneAndUpdate(
+      {appId:order.appId,ownerEmail:normalizeEmail(order.customerEmail)},
+      {$set:{orderId:order._id,appId:order.appId,ownerEmail:normalizeEmail(order.customerEmail),active:true,durationDays:days,durationMonths:Number(order.durationMonths||0),expiresAt}},
+      {upsert:true,new:true,setDefaultsOnInsert:true}
+    );
+    await writeAudit(req,"approve_payment","order",order._id,{studentEmail:order.customerEmail,appId:order.appId,durationDays:days,expiresAt});
+    res.json({success:true,status:"paid",ownership:own});
+  }catch(e){res.status(500).json({error:e.message||"Could not approve payment"});}
+});
+
 // ADMIN UPI QR PAYMENT VERIFICATION
 // ============================================================
 

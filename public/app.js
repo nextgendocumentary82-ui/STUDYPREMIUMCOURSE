@@ -1206,26 +1206,10 @@ async function startCashfreePayment({ name, email, phone }) {
 
       const verified = await verifyResponse.json();
 
-      if (verifyResponse.ok && verified.success && verified.status === "paid") {
-        const accessResponse = await fetch("/api/access/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderId: verified.orderId,
-            type: accessType
-          })
-        });
-
-        const accessResult = await accessResponse.json();
-        if (!accessResponse.ok || !accessResult.success) {
-          throw new Error(accessResult.error || "Could not create secure access.");
-        }
-
+      if (verifyResponse.ok && verified.success && verified.pendingApproval) {
         closePay();
-        toast("Payment verified. Opening access...");
-        setTimeout(() => {
-          window.location.href = accessResult.url;
-        }, 700);
+        toast("Payment verified. Waiting for admin approval. Access will unlock after approval.");
+        resetPayButton();
         return;
       }
 
@@ -1270,27 +1254,9 @@ async function verifyPayment(payment) {
 
     // A fresh one-time token is created only after server-side
     // Razorpay signature verification succeeds.
-    const accessResponse = await fetch("/api/access/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orderId: result.orderId,
-        type: accessType
-      })
-    });
-
-    const accessResult = await accessResponse.json();
-
-    if (!accessResponse.ok || !accessResult.success) {
-      throw new Error(accessResult.error || "Could not create secure access.");
-    }
-
     closePay();
-    toast("Payment verified. Opening access...");
-
-    setTimeout(() => {
-      window.location.href = accessResult.url;
-    }, 700);
+    toast("Payment verified. Waiting for admin approval. Access will unlock after approval.");
+    resetPayButton();
 
   } catch (error) {
     console.error("Payment verification error:", error);

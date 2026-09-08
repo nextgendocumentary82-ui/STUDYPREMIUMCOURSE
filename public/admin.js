@@ -984,6 +984,16 @@ async function saveWebsiteSettings() {
    PAYMENTS
 ========================================================= */
 
+async function approvePaymentOrder(id){
+  if(!confirm("Payment verify ho gaya hai. Admin approval ke baad access activate hoga. Approve karein?")) return;
+  try{
+    const result=await api(`/api/admin/orders/${id}/approve`,{method:"POST"});
+    if(!result.success) throw new Error(result.error||"Approval failed");
+    alert("Payment approved. Student access is now active.");
+    await refreshAdmin();
+  }catch(e){ alert(e.message||"Could not approve payment"); }
+}
+
 function renderOrders(orders) {
 
   const container =
@@ -1066,6 +1076,11 @@ function renderOrders(orders) {
 
           <span>
 
+            Duration:
+            ${Number(order.durationDays||0)>0 ? Math.ceil(Number(order.durationDays)/365*100)/100 + " year(s)" : "Lifetime"}
+
+            •
+
             Gateway:
             ${esc(order.paymentGateway || "razorpay")}
 
@@ -1090,6 +1105,18 @@ function renderOrders(orders) {
               <button class="secondary" onclick="rejectQrOrder('${order._id}')">Reject</button>
             </div>
             <small style="display:block;margin-top:8px">Verify the exact amount and reference in your UPI/bank account before approving.</small>
+          ` : ""}
+          ${["pending_admin","pending_verification"].includes(status) && String(order.paymentGateway||"").toLowerCase() !== "upi_qr" ? `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              <button class="primary" onclick="approvePaymentOrder('${order._id}')">✓ Approve & Grant Access</button>
+            </div>
+            <small style="display:block;margin-top:8px">Payment server-side confirmed. Approve only after checking the payment details.</small>
+          ` : ""}
+
+          ${order.status === "paid" ? `
+            <div style="margin-top:8px">
+              <span>⏳ Access duration: ${Number(order.durationDays||0) > 0 ? Math.ceil(Number(order.durationDays||0)/365*100)/100 + " year(s)" : "Lifetime"}</span>
+            </div>
           ` : ""}
 
           <span>

@@ -11,7 +11,7 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const compression = require("compression");
-const mongooseLib = require("mongoose");
+const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
@@ -110,7 +110,18 @@ app.post(
             if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
             order.status = "paid";
             await order.save();
-            await activateOwnership(order);
+            await BatchOwnership.findOneAndUpdate(
+              { orderId: order._id },
+              { $set: {
+                appId: order.appId,
+                ownerEmail: normalizeEmail(order.customerEmail),
+                orderId: order._id,
+                active: true,
+                durationMonths: Number(order.durationMonths || 0),
+                expiresAt: makeOwnershipExpiry(null, order)
+              } },
+              { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
           }
 
           const donation = await DonationPayment.findOne({ razorpayOrderId });
@@ -232,7 +243,20 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await activateOwnership(order);
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          {
+            $set: {
+              appId: order.appId,
+              ownerEmail: normalizeEmail(order.customerEmail),
+              orderId: order._id,
+              active: true,
+              durationMonths: Number(order.durationMonths || 0),
+              expiresAt: makeOwnershipExpiry(null, order)
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
       }
 
       if (
@@ -998,7 +1022,7 @@ async function b2DownloadStream(
 // ============================================================
 
 const appSchema =
-  new mongooseLib.Schema(
+  new mongoose.Schema(
     {
       name: {
         type: String,
@@ -1104,11 +1128,6 @@ const appSchema =
         default: "Lifetime"
       },
 
-      validityOptions: {
-        type: [String],
-        default: ["2 Months", "3 Months", "1 Year", "Lifetime"]
-      },
-
       rating: {
         type: Number,
         default: 4.8,
@@ -1147,7 +1166,7 @@ const appSchema =
   );
 
 const orderSchema =
-  new mongooseLib.Schema(
+  new mongoose.Schema(
     {
       paymentGateway: {
         type: String,
@@ -1205,7 +1224,7 @@ const orderSchema =
 
       appId: {
         type:
-          mongooseLib.Schema.Types.ObjectId,
+          mongoose.Schema.Types.ObjectId,
         ref: "App",
         required: true
       },
@@ -1236,6 +1255,13 @@ const orderSchema =
         default: "created"
       },
 
+      durationMonths: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 120
+      },
+
       customerName: {
         type: String,
         default: ""
@@ -1249,16 +1275,6 @@ const orderSchema =
       customerPhone: {
         type: String,
         default: ""
-      },
-
-      purchaseDuration: {
-        type: String,
-        default: "Lifetime"
-      },
-
-      durationMonths: {
-        type: Number,
-        default: 0
       }
     },
     {
@@ -1267,7 +1283,7 @@ const orderSchema =
   );
 
 const accessSchema =
-  new mongooseLib.Schema(
+  new mongoose.Schema(
     {
       tokenHash: {
         type: String,
@@ -1277,14 +1293,14 @@ const accessSchema =
 
       orderId: {
         type:
-          mongooseLib.Schema.Types.ObjectId,
+          mongoose.Schema.Types.ObjectId,
         ref: "Order",
         required: true
       },
 
       appId: {
         type:
-          mongooseLib.Schema.Types.ObjectId,
+          mongoose.Schema.Types.ObjectId,
         ref: "App",
         required: true
       },
@@ -1314,7 +1330,7 @@ const accessSchema =
   );
 
 const adminSchema =
-  new mongooseLib.Schema(
+  new mongoose.Schema(
     {
       username: {
         type: String,
@@ -1338,7 +1354,7 @@ const adminSchema =
   );
 
 const settingsSchema =
-  new mongooseLib.Schema(
+  new mongoose.Schema(
     {
       key: {
         type: String,
@@ -1373,7 +1389,7 @@ const settingsSchema =
 // Unique visitors are stored in MongoDB; "live" means heartbeat
 // seen within the last 45 seconds. No payment/user credentials stored.
 // ============================================================
-const visitorSchema = new mongooseLib.Schema({
+const visitorSchema = new mongoose.Schema({
   visitorId: { type: String, required: true, unique: true, index: true },
   firstSeen: { type: Date, default: Date.now, index: true },
   lastSeen: { type: Date, default: Date.now, index: true },
@@ -1382,33 +1398,32 @@ const visitorSchema = new mongooseLib.Schema({
   ipHash: { type: String, default: "" }
 }, { timestamps: true });
 
-const Visitor = mongooseLib.model("Visitor", visitorSchema);
+const Visitor = mongoose.model("Visitor", visitorSchema);
 
 function visitorIpHash(req) {
   const raw = String(req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
   return raw ? crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24) : "";
 }
 
-const userSchema = new mongooseLib.Schema({
+const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 80 },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true }
 }, { timestamps: true });
 
-const batchOwnershipSchema = new mongooseLib.Schema({
-  appId: { type: mongooseLib.Schema.Types.ObjectId, ref: "App", required: true },
+const batchOwnershipSchema = new mongoose.Schema({
+  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true },
   ownerEmail: { type: String, required: true, lowercase: true, trim: true, index: true },
-  orderId: { type: mongooseLib.Schema.Types.ObjectId, ref: "Order", required: true },
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
   active: { type: Boolean, default: true },
-  donatedAt: { type: Date, default: null },
-  purchaseDuration: { type: String, default: "Lifetime" },
   durationMonths: { type: Number, default: 0 },
-  expiresAt: { type: Date, default: null }
+  expiresAt: { type: Date, default: null, index: true },
+  donatedAt: { type: Date, default: null }
 }, { timestamps: true });
 
-const donationSchema = new mongooseLib.Schema({
-  ownershipId: { type: mongooseLib.Schema.Types.ObjectId, ref: "BatchOwnership", required: true },
-  appId: { type: mongooseLib.Schema.Types.ObjectId, ref: "App", required: true },
+const donationSchema = new mongoose.Schema({
+  ownershipId: { type: mongoose.Schema.Types.ObjectId, ref: "BatchOwnership", required: true },
+  appId: { type: mongoose.Schema.Types.ObjectId, ref: "App", required: true },
   donorEmail: { type: String, required: true, lowercase: true, trim: true },
   recipientEmail: { type: String, required: true, lowercase: true, trim: true },
   otpHash: { type: String, required: true },
@@ -1420,10 +1435,10 @@ const donationSchema = new mongooseLib.Schema({
   rejectionReason: { type: String, default: "" }
 }, { timestamps: true });
 
-const User = mongooseLib.model("User", userSchema);
-const BatchOwnership = mongooseLib.model("BatchOwnership", batchOwnershipSchema);
-const Donation = mongooseLib.model("Donation", donationSchema);
-const donationPaymentSchema = new mongooseLib.Schema({
+const User = mongoose.model("User", userSchema);
+const BatchOwnership = mongoose.model("BatchOwnership", batchOwnershipSchema);
+const Donation = mongoose.model("Donation", donationSchema);
+const donationPaymentSchema = new mongoose.Schema({
   donorName: { type: String, required: true, trim: true, maxlength: 100 },
   donorEmail: { type: String, required: true, lowercase: true, trim: true },
   amount: { type: Number, required: true, min: 1 },
@@ -1432,43 +1447,39 @@ const donationPaymentSchema = new mongooseLib.Schema({
   razorpayPaymentId: { type: String, default: "" },
   cashfreeOrderId: { type: String, unique: true, sparse: true },
   cashfreePaymentId: { type: String, default: "" },
-  upiOrderId: { type: String, unique: true, sparse: true },
-  upiReference: { type: String, default: "" },
-  upiSubmittedAt: { type: Date, default: null },
-  upiVerifiedAt: { type: Date, default: null },
-  paymentGateway: { type: String, enum: ["razorpay", "cashfree", "upi_qr"], default: "razorpay" },
+  paymentGateway: { type: String, enum: ["razorpay", "cashfree"], default: "razorpay" },
   status: { type: String, enum: ["created", "paid", "failed"], default: "created" }
 }, { timestamps: true });
 
-const DonationPayment = mongooseLib.model("DonationPayment", donationPaymentSchema);
+const DonationPayment = mongoose.model("DonationPayment", donationPaymentSchema);
 
 
 const AppModel =
-  mongooseLib.model(
+  mongoose.model(
     "App",
     appSchema
   );
 
 const Order =
-  mongooseLib.model(
+  mongoose.model(
     "Order",
     orderSchema
   );
 
 const Access =
-  mongooseLib.model(
+  mongoose.model(
     "Access",
     accessSchema
   );
 
 const Admin =
-  mongooseLib.model(
+  mongoose.model(
     "Admin",
     adminSchema
   );
 
 const Settings =
-  mongooseLib.model(
+  mongoose.model(
     "Settings",
     settingsSchema
   );
@@ -1622,6 +1633,20 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "").slice(-10);
+}
+
+function makeOwnershipExpiry(app, order) {
+  const months = Number(order?.durationMonths || 0);
+  if (months > 0) {
+    const d = new Date();
+    d.setMonth(d.getMonth() + months);
+    return d;
+  }
+  return null;
+}
+
 async function sendDonationOtp(recipientEmail, otp, donorName, batchName) {
   const host = String(process.env.SMTP_HOST || "").trim();
   const port = Number(process.env.SMTP_PORT || 587);
@@ -1678,31 +1703,6 @@ function validHttpUrl(value) {
   } catch {
     return false;
   }
-}
-
-function normalizeDurationLabel(value) {
-  const v = String(value || "Lifetime").trim().toLowerCase();
-  if (v === "lifetime" || v === "life time") return { label: "Lifetime", months: 0 };
-  const n = Number((v.match(/\d+(?:\.\d+)?/) || [0])[0]);
-  if (!n) return { label: "Lifetime", months: 0 };
-  if (v.includes("year")) return { label: n === 1 ? "1 Year" : `${n} Years`, months: Math.round(n * 12) };
-  return { label: n === 1 ? "1 Month" : `${n} Months`, months: Math.max(1, Math.round(n)) };
-}
-
-function durationExpiresAt(months) {
-  if (!months || months <= 0) return null;
-  const d = new Date();
-  d.setMonth(d.getMonth() + months);
-  return d;
-}
-
-async function activateOwnership(order) {
-  const d = normalizeDurationLabel(order.purchaseDuration || "Lifetime");
-  return BatchOwnership.findOneAndUpdate(
-    { orderId: order._id },
-    { $set: { appId: order.appId, ownerEmail: normalizeEmail(order.customerEmail), orderId: order._id, active: true, purchaseDuration: d.label, durationMonths: d.months, expiresAt: durationExpiresAt(d.months) } },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
 }
 
 function normalizeAppBody(body) {
@@ -1811,10 +1811,6 @@ function normalizeAppBody(body) {
         body.validity ||
         "Lifetime"
       ),
-
-    validityOptions: Array.isArray(body.validityOptions) && body.validityOptions.length
-      ? body.validityOptions.map(normalizeDurationLabel).map(x => x.label).filter((x, i, a) => a.indexOf(x) === i).slice(0, 10)
-      : ["2 Months", "3 Months", "1 Year", "Lifetime"],
 
     rating:
       Number(
@@ -1993,22 +1989,28 @@ app.get("/api/auth/me", requireUser, (req, res) => {
 
 app.get("/api/my-batches", requireUser, async (req, res) => {
   try {
-    await BatchOwnership.updateMany(
-      { ownerEmail: req.user.email, active: true, expiresAt: { $lte: new Date(), $ne: null } },
-      { $set: { active: false } }
-    );
     const ownerships = await BatchOwnership.find({ ownerEmail: req.user.email, active: true })
       .populate("appId")
       .sort({ createdAt: -1 })
       .lean();
-    res.json(ownerships.map(o => ({
-      ownershipId: o._id,
-      purchasedAt: o.createdAt,
-      donatedAt: o.donatedAt,
-      purchaseDuration: o.purchaseDuration || "Lifetime",
-      expiresAt: o.expiresAt,
-      batch: o.appId
-    })));
+
+    const now = new Date();
+    const valid = [];
+    for (const o of ownerships) {
+      if (o.expiresAt && new Date(o.expiresAt) <= now) {
+        await BatchOwnership.updateOne({ _id: o._id }, { $set: { active: false } });
+        continue;
+      }
+      valid.push({
+        ownershipId: o._id,
+        purchasedAt: o.createdAt,
+        donatedAt: o.donatedAt,
+        expiresAt: o.expiresAt,
+        durationMonths: o.durationMonths || 0,
+        batch: o.appId
+      });
+    }
+    res.json(valid);
   } catch (error) {
     console.error("MY BATCHES ERROR:", error);
     res.status(500).json({ error: "Unable to load your batches." });
@@ -2017,22 +2019,41 @@ app.get("/api/my-batches", requireUser, async (req, res) => {
 
 app.post("/api/my-batches/access", requireUser, async (req, res) => {
   try {
-    const ownership = await BatchOwnership.findOne({ _id: req.body.ownershipId, ownerEmail: req.user.email, active: true, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] });
-    if (!ownership) return res.status(404).json({ error: "Batch ownership not found." });
-    const item = await AppModel.findById(ownership.appId).lean();
+    const ownership = await BatchOwnership.findOne({
+      _id: req.body.ownershipId,
+      ownerEmail: req.user.email,
+      active: true
+    }).populate("appId").populate("orderId");
+
+    if (!ownership) return res.status(404).json({ error: "Batch access not found. Please purchase/restore access again." });
+    if (ownership.expiresAt && new Date(ownership.expiresAt) <= new Date()) {
+      ownership.active = false;
+      await ownership.save();
+      return res.status(403).json({ error: "This batch access has expired. Please purchase again." });
+    }
+    if (!ownership.orderId || ownership.orderId.status !== "paid") {
+      return res.status(403).json({ error: "Payment is not approved yet." });
+    }
+
+    const item = ownership.appId;
     if (!item) return res.status(404).json({ error: "Batch not found." });
-    const order = await Order.findOne({ _id: ownership.orderId, status: "paid" }).lean();
-    if (!order) return res.status(403).json({ error: "Original paid order is not valid." });
-    const type = String(req.body.type || "app");
-    if (!["app", "website"].includes(type)) return res.status(400).json({ error: "Invalid access type." });
+
+    const type = item.websiteUrl ? "website" : "app";
     const token = createAccessToken();
-    await Access.create({ tokenHash: hashAccessToken(token), orderId: order._id, appId: item._id, type, expiresAt: new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000) });
-    res.json({ success: true, url: `/api/access/${type === "website" ? "website" : "download"}?token=${encodeURIComponent(token)}` });
+    const expiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+    await Access.create({ tokenHash: hashAccessToken(token), orderId: ownership.orderId._id, appId: item._id, type, expiresAt });
+
+    const url = type === "website"
+      ? `/api/access/website?token=${encodeURIComponent(token)}`
+      : `/api/access/download?token=${encodeURIComponent(token)}`;
+
+    return res.json({ success: true, url, expiresAt, type });
   } catch (error) {
     console.error("MY BATCH ACCESS ERROR:", error);
-    res.status(500).json({ error: "Unable to create batch access." });
+    return res.status(500).json({ error: "Could not open batch." });
   }
 });
+
 
 // ============================================================
 // DONATE BATCH
@@ -2366,62 +2387,6 @@ app.post("/api/donations/payment/cashfree/verify", async (req, res) => {
   }
 });
 
-
-// ============================================================
-// DONATION UPI QR
-// ============================================================
-app.post("/api/donations/payment/upi-qr/create", async (req, res) => {
-  try {
-    const donorName = String(req.body.donorName || "").trim();
-    const donorEmail = normalizeEmail(req.body.donorEmail);
-    const amount = Math.round(Number(req.body.amount || 0));
-    if (!donorName || donorName.length < 2) return res.status(400).json({ error: "Please enter your name." });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(donorEmail)) return res.status(400).json({ error: "Please enter a valid email." });
-    if (!Number.isFinite(amount) || amount < 1) return res.status(400).json({ error: "Minimum donation is ₹1." });
-    const upiOrderId = `donate_upi_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
-    await DonationPayment.create({ donorName, donorEmail, amount, currency: "INR", upiOrderId, paymentGateway: "upi_qr", status: "created" });
-    res.json({ success: true, orderId: upiOrderId, amount, currency: "INR", qrUrl: "/qr-payment.jpeg" });
-  } catch (error) {
-    console.error("CREATE DONATION QR ERROR:", error);
-    res.status(500).json({ error: "Could not create donation QR payment." });
-  }
-});
-
-app.post("/api/donations/payment/upi-qr/submit", async (req, res) => {
-  try {
-    const upiOrderId = String(req.body.orderId || "").trim();
-    const reference = String(req.body.reference || "").trim();
-    if (!upiOrderId || !/^[A-Za-z0-9._-]{6,64}$/.test(reference)) return res.status(400).json({ error: "Enter a valid UPI transaction/reference ID." });
-    const donation = await DonationPayment.findOne({ upiOrderId });
-    if (!donation) return res.status(404).json({ error: "Donation QR order not found." });
-    if (donation.status === "paid") return res.json({ success: true, status: "paid" });
-    donation.upiReference = reference; donation.upiSubmittedAt = new Date(); donation.status = "created"; await donation.save();
-    res.json({ success: true, status: "pending_verification", message: "Donation reference submitted. Admin verification required." });
-  } catch (error) {
-    res.status(500).json({ error: "Could not submit donation reference." });
-  }
-});
-
-app.get("/api/admin/donation-payments", requireAdmin, async (req, res) => {
-  try { res.json(await DonationPayment.find({ paymentGateway: "upi_qr", status: { $ne: "paid" } }).sort({ createdAt: -1 }).limit(500).lean()); }
-  catch { res.status(500).json({ error: "Unable to load donation QR payments." }); }
-});
-
-app.post("/api/admin/donation-payments/:id/approve", requireAdmin, async (req, res) => {
-  try {
-    const donation = await DonationPayment.findOne({ _id: req.params.id, paymentGateway: "upi_qr" });
-    if (!donation) return res.status(404).json({ error: "Donation payment not found." });
-    if (!donation.upiReference) return res.status(400).json({ error: "No UPI reference submitted." });
-    donation.status = "paid"; donation.upiVerifiedAt = new Date(); await donation.save();
-    res.json({ success: true });
-  } catch { res.status(500).json({ error: "Could not approve donation." }); }
-});
-
-app.post("/api/admin/donation-payments/:id/reject", requireAdmin, async (req, res) => {
-  try { const d = await DonationPayment.findOneAndUpdate({ _id: req.params.id, paymentGateway: "upi_qr" }, { status: "failed" }, { new: true }); if (!d) return res.status(404).json({ error: "Donation payment not found." }); res.json({ success: true }); }
-  catch { res.status(500).json({ error: "Could not reject donation." }); }
-});
-
 app.get("/api/donations/leaderboard", async (req, res) => {
   try {
     const rows = await DonationPayment.aggregate([
@@ -2605,8 +2570,7 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = "",
-        purchaseDuration = ""
+        customerPhone = ""
       } = req.body;
 
       if (!appId) {
@@ -2657,11 +2621,6 @@ app.post(
             "This item is free"
         });
       }
-
-      const durationChoices = Array.isArray(item.validityOptions) && item.validityOptions.length ? item.validityOptions : ["2 Months", "3 Months", "1 Year", "Lifetime"];
-      const selectedDuration = normalizeDurationLabel(purchaseDuration || item.validity || durationChoices[durationChoices.length - 1]);
-      const allowedDuration = durationChoices.map(normalizeDurationLabel).some(x => x.label === selectedDuration.label);
-      if (!allowedDuration) return res.status(400).json({ error: "Invalid purchase duration selected." });
 
       const rp =
         getRazorpay();
@@ -2718,10 +2677,7 @@ app.post(
           customerEmail.trim(),
 
         customerPhone:
-          customerPhone.trim(),
-
-        purchaseDuration: selectedDuration.label,
-        durationMonths: selectedDuration.months
+          customerPhone.trim()
       });
 
       res.json({
@@ -2778,8 +2734,7 @@ app.post(
         appId,
         customerName = "",
         customerEmail = "",
-        customerPhone = "",
-        purchaseDuration = ""
+        customerPhone = ""
       } = req.body;
 
       if (!appId) return res.status(400).json({ error: "App ID is required" });
@@ -2797,10 +2752,6 @@ app.post(
       if (item.accessType !== "paid" || item.price <= 0) {
         return res.status(400).json({ error: "This item is free" });
       }
-
-      const durationChoices = Array.isArray(item.validityOptions) && item.validityOptions.length ? item.validityOptions : ["2 Months", "3 Months", "1 Year", "Lifetime"];
-      const selectedDuration = normalizeDurationLabel(purchaseDuration || item.validity || durationChoices[durationChoices.length - 1]);
-      if (!durationChoices.map(normalizeDurationLabel).some(x => x.label === selectedDuration.label)) return res.status(400).json({ error: "Invalid purchase duration selected." });
 
       const localOrderId = `spc_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
       const publicUrl = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -2845,9 +2796,7 @@ app.post(
         status: "created",
         customerName: String(customerName).trim(),
         customerEmail: String(customerEmail).trim().toLowerCase(),
-        customerPhone: String(customerPhone).trim(),
-        purchaseDuration: selectedDuration.label,
-        durationMonths: selectedDuration.months
+        customerPhone: String(customerPhone).trim()
       });
 
       return res.json({
@@ -2895,7 +2844,20 @@ app.post(
         order.cashfreeCfOrderId = String(cashfreeOrder.cf_order_id || order.cashfreeCfOrderId || "");
         await order.save();
 
-        await activateOwnership(order);
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          {
+            $set: {
+              appId: order.appId,
+              ownerEmail: normalizeEmail(order.customerEmail),
+              orderId: order._id,
+              active: true,
+              durationMonths: Number(order.durationMonths || 0),
+              expiresAt: makeOwnershipExpiry(null, order)
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
 
         return res.json({
           success: true,
@@ -2936,7 +2898,7 @@ app.post(
 
 app.post("/api/payments/upi-qr/order", async (req, res) => {
   try {
-    const { appId, customerName = "", customerEmail = "", customerPhone = "", purchaseDuration = "" } = req.body;
+    const { appId, customerName = "", customerEmail = "", customerPhone = "" } = req.body;
 
     if (!appId) return res.status(400).json({ error: "App ID is required" });
     if (!String(customerName).trim()) return res.status(400).json({ error: "Customer name is required" });
@@ -2948,9 +2910,6 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
     if (item.accessType !== "paid" || Number(item.price) <= 0) {
       return res.status(400).json({ error: "This item is free" });
     }
-    const durationChoices = Array.isArray(item.validityOptions) && item.validityOptions.length ? item.validityOptions : ["2 Months", "3 Months", "1 Year", "Lifetime"];
-    const selectedDuration = normalizeDurationLabel(purchaseDuration || item.validity || durationChoices[durationChoices.length - 1]);
-    if (!durationChoices.map(normalizeDurationLabel).some(x => x.label === selectedDuration.label)) return res.status(400).json({ error: "Invalid purchase duration selected." });
 
     const upiOrderId = `upi_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
     const order = await Order.create({
@@ -2963,9 +2922,7 @@ app.post("/api/payments/upi-qr/order", async (req, res) => {
       status: "created",
       customerName: String(customerName).trim().slice(0, 100),
       customerEmail: String(customerEmail).trim().toLowerCase(),
-      customerPhone: String(customerPhone).trim().slice(0, 15),
-      purchaseDuration: selectedDuration.label,
-      durationMonths: selectedDuration.months
+      customerPhone: String(customerPhone).trim().slice(0, 15)
     });
 
     return res.json({
@@ -3076,7 +3033,18 @@ app.post(
       order.status = "paid";
       await order.save();
 
-      await activateOwnership(order);
+      await BatchOwnership.findOneAndUpdate(
+        { orderId: order._id },
+        { $set: {
+                appId: order.appId,
+                ownerEmail: normalizeEmail(order.customerEmail),
+                orderId: order._id,
+                active: true,
+                durationMonths: Number(order.durationMonths || 0),
+                expiresAt: makeOwnershipExpiry(null, order)
+              } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
 
       const item = await AppModel.findById(order.appId).lean();
       if (!item) return res.status(404).json({ error: "Purchased item no longer exists" });
@@ -3133,7 +3101,18 @@ app.post(
         order.status = "paid";
         await order.save();
 
-        await activateOwnership(order);
+        await BatchOwnership.findOneAndUpdate(
+          { orderId: order._id },
+          { $set: {
+                appId: order.appId,
+                ownerEmail: normalizeEmail(order.customerEmail),
+                orderId: order._id,
+                active: true,
+                durationMonths: Number(order.durationMonths || 0),
+                expiresAt: makeOwnershipExpiry(null, order)
+              } },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
 
         return res.json({ success: true, status: "paid", orderId: order._id, paymentId });
       }
@@ -3154,6 +3133,66 @@ app.post(
     }
   }
 );
+
+// ============================================================
+// ALREADY PURCHASED / RESTORE ACCESS
+// Works after Razorpay, Cashfree or admin-approved UPI QR payment.
+// The customer must provide the same email + mobile used for payment.
+// ============================================================
+
+app.post("/api/purchases/already-owned", async (req, res) => {
+  try {
+    const appId = String(req.body.appId || "").trim();
+    const email = normalizeEmail(req.body.email);
+    const phone = normalizePhone(req.body.phone);
+
+    if (!appId || !mongoose.isValidObjectId(appId)) return res.status(400).json({ error: "Invalid batch." });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Enter the same email used for payment." });
+    if (phone.length < 10) return res.status(400).json({ error: "Enter the same mobile number used for payment." });
+
+    const ownerships = await BatchOwnership.find({ appId, ownerEmail: email, active: true }).populate("orderId").populate("appId").sort({ createdAt: -1 });
+    const ownership = ownerships.find(o => {
+      if (!o.orderId || o.orderId.status !== "paid") return false;
+      if (o.expiresAt && new Date(o.expiresAt) <= new Date()) return false;
+      return normalizePhone(o.orderId.customerPhone) === phone;
+    });
+
+    if (!ownership) {
+      return res.status(403).json({ error: "No approved purchase found for this email and mobile number." });
+    }
+
+    if (ownership.expiresAt && new Date(ownership.expiresAt) <= new Date()) {
+      ownership.active = false;
+      await ownership.save();
+      return res.status(403).json({ error: "This batch access has expired. Please purchase again." });
+    }
+
+    const item = ownership.appId;
+    const type = item.websiteUrl ? "website" : "app";
+    const token = createAccessToken();
+    const expiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+
+    await Access.create({
+      tokenHash: hashAccessToken(token),
+      orderId: ownership.orderId._id,
+      appId: item._id,
+      type,
+      expiresAt
+    });
+
+    return res.json({
+      success: true,
+      type,
+      expiresAt,
+      url: type === "website"
+        ? `/api/access/website?token=${encodeURIComponent(token)}`
+        : `/api/access/download?token=${encodeURIComponent(token)}`
+    });
+  } catch (error) {
+    console.error("ALREADY PURCHASED ERROR:", error);
+    return res.status(500).json({ error: "Could not restore purchased access." });
+  }
+});
 
 // ============================================================
 // CREATE ACCESS TOKEN
@@ -3194,9 +3233,6 @@ app.post(
         });
       }
 
-      const ownership = await BatchOwnership.findOne({ orderId: order._id, ownerEmail: normalizeEmail(order.customerEmail), active: true, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] });
-      if (!ownership) return res.status(403).json({ error: "Course access is not active or has expired. Please purchase again." });
-
       const token =
         createAccessToken();
 
@@ -3217,24 +3253,27 @@ app.post(
         });
       }
 
-      const expiresAt = ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+      const expiresAt = makeOwnershipExpiry(item, order) ||
+        new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+
+      // Course batches usually open their website. If the requested app
+      // access has no uploaded app file, safely fall back to the website
+      // instead of sending the student to a dead download endpoint.
+      const effectiveType =
+        type === "app" && !item.appFileKey && item.websiteUrl
+          ? "website"
+          : type;
 
       await Access.create({
         tokenHash,
-
-        orderId:
-          order._id,
-
-        appId:
-          item._id,
-
-        type,
-
+        orderId: order._id,
+        appId: item._id,
+        type: effectiveType,
         expiresAt
       });
 
       const destination =
-        type === "website"
+        effectiveType === "website"
           ? item.websiteUrl
           : (
             item.appFileKey
@@ -3530,17 +3569,18 @@ app.get(
         );
       }
 
-      if (
-        item.downloadUrl
-      ) {
-        return res.redirect(
-          item.downloadUrl
-        );
+      if (item.downloadUrl) {
+        return res.redirect(item.downloadUrl);
+      }
+
+      // A course may not have an APK/app file. In that case the secure
+      // access token should still open the configured course website.
+      if (item.websiteUrl && validHttpUrl(item.websiteUrl)) {
+        return res.redirect(item.websiteUrl);
       }
 
       return res.status(404).json({
-        error:
-          "App file has not been uploaded by admin."
+        error: "App file or course website has not been configured by admin."
       });
     } catch (error) {
       console.error(
@@ -4213,74 +4253,6 @@ app.post(
   }
 );
 
-
-// ============================================================
-// ADMIN COURSE ACCESS CONTROL
-// ============================================================
-app.get("/api/admin/batch-access", requireAdmin, async (req, res) => {
-  try {
-    const rows = await BatchOwnership.find().populate("appId", "name logo category").populate("orderId", "customerName customerEmail customerPhone amount paymentGateway purchaseDuration durationMonths createdAt").sort({ createdAt: -1 }).limit(1000).lean();
-    const now = new Date();
-    res.json(rows.map(x => ({ ...x, expired: !!x.expiresAt && new Date(x.expiresAt) <= now })));
-  } catch (error) {
-    console.error("ADMIN BATCH ACCESS ERROR:", error);
-    res.status(500).json({ error: "Unable to load course access." });
-  }
-});
-
-app.post("/api/admin/batch-access/:id/remove", requireAdmin, async (req, res) => {
-  try {
-    const ownership = await BatchOwnership.findById(req.params.id);
-    if (!ownership) return res.status(404).json({ error: "Course access not found." });
-    ownership.active = false;
-    await ownership.save();
-    await Access.deleteMany({ orderId: ownership.orderId, appId: ownership.appId });
-    res.json({ success: true, message: "Course access removed. Student must pay again." });
-  } catch (error) {
-    console.error("REMOVE BATCH ACCESS ERROR:", error);
-    res.status(500).json({ error: "Could not remove course access." });
-  }
-});
-
-app.post("/api/admin/batch-access/:id/duration", requireAdmin, async (req, res) => {
-  try {
-    const ownership = await BatchOwnership.findById(req.params.id);
-    if (!ownership) return res.status(404).json({ error: "Course access not found." });
-    const d = normalizeDurationLabel(req.body.duration);
-    ownership.purchaseDuration = d.label;
-    ownership.durationMonths = d.months;
-    ownership.expiresAt = durationExpiresAt(d.months);
-    ownership.active = true;
-    await ownership.save();
-    res.json({ success: true, purchaseDuration: d.label, expiresAt: ownership.expiresAt });
-  } catch (error) {
-    res.status(500).json({ error: "Could not change course duration." });
-  }
-});
-
-// Student can reopen a paid batch using the same email + phone used for payment.
-app.post("/api/purchases/open", async (req, res) => {
-  try {
-    const appId = String(req.body.appId || "").trim();
-    const email = normalizeEmail(req.body.email);
-    const phone = String(req.body.phone || "").replace(/\D/g, "").slice(-15);
-    if (!appId || !email || phone.length < 8) return res.status(400).json({ error: "Email and mobile number are required." });
-    await BatchOwnership.updateMany({ appId, ownerEmail: email, active: true, expiresAt: { $lte: new Date(), $ne: null } }, { $set: { active: false } });
-    const ownership = await BatchOwnership.findOne({ appId, ownerEmail: email, active: true, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] }).populate("orderId");
-    if (!ownership || String(ownership.orderId?.customerPhone || "").replace(/\D/g, "").slice(-15) !== phone) return res.status(403).json({ error: "No active purchase found for this email and mobile number." });
-    const order = await Order.findOne({ _id: ownership.orderId._id, status: "paid" });
-    if (!order) return res.status(403).json({ error: "Paid order not found." });
-    const item = await AppModel.findById(appId).lean();
-    if (!item) return res.status(404).json({ error: "Course not found." });
-    const token = createAccessToken();
-    await Access.create({ tokenHash: hashAccessToken(token), orderId: order._id, appId: item._id, type: "app", expiresAt: ownership.expiresAt || new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000) });
-    res.json({ success: true, url: `/api/access/download?token=${encodeURIComponent(token)}`, purchaseDuration: ownership.purchaseDuration, expiresAt: ownership.expiresAt });
-  } catch (error) {
-    console.error("OPEN PURCHASE ERROR:", error);
-    res.status(500).json({ error: "Could not open purchased course." });
-  }
-});
-
 // ============================================================
 // ADMIN ORDERS
 // ============================================================
@@ -4328,7 +4300,20 @@ app.post("/api/admin/orders/:id/upi-qr/approve", requireAdmin, async (req, res) 
     order.upiVerifiedAt = new Date();
     await order.save();
 
-    await activateOwnership(order);
+    await BatchOwnership.findOneAndUpdate(
+      { orderId: order._id },
+      {
+        $set: {
+          appId: order.appId,
+          ownerEmail: normalizeEmail(order.customerEmail),
+          orderId: order._id,
+          active: true,
+          durationMonths: Number(order.durationMonths || 0),
+          expiresAt: makeOwnershipExpiry(null, order)
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     return res.json({ success: true, status: "paid", orderId: order._id });
   } catch (error) {
@@ -4966,7 +4951,7 @@ async function startServer() {
       );
     }
 
-    await mongooseLib.connect(
+    await mongoose.connect(
       process.env.MONGODB_URI
     );
 

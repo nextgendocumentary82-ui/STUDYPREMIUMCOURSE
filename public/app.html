@@ -80,7 +80,6 @@
 
       <input id="buyerPhone" type="tel" placeholder="Mobile number" autocomplete="tel" maxlength="15">
 
-      <select id="purchaseDuration" aria-label="Course validity"></select>
 
       <select id="paymentGateway" aria-label="Payment method">
         <option value="cashfree">Cashfree - UPI / Cards / Net Banking</option>
@@ -107,19 +106,6 @@
 
 
 
-
-  <div id="alreadyPurchasedModal" class="modal hidden">
-    <div class="modal-card">
-      <button class="close" onclick="closeAlreadyPurchased()" aria-label="Close">×</button>
-      <h2>🔐 Already Purchased?</h2>
-      <p>Use the same email and mobile number that you entered during payment.</p>
-      <input id="existingBuyerEmail" type="email" placeholder="Payment email" autocomplete="email">
-      <input id="existingBuyerPhone" type="tel" placeholder="Payment mobile number" autocomplete="tel" maxlength="15">
-      <button class="primary" onclick="openAlreadyPurchased()">Open Batch</button>
-      <small>Access opens only when the server finds an active verified purchase.</small>
-    </div>
-  </div>
-
   <!-- ================= UPI QR PAYMENT MODAL ================= -->
 
   <div id="qrPayModal" class="modal hidden">
@@ -137,6 +123,20 @@
       <input id="upiReference" type="text" placeholder="Enter UPI transaction/reference ID" autocomplete="off" maxlength="64">
       <button id="upiSubmitButton" class="primary" onclick="submitUpiQrPayment()">I Have Paid — Submit Reference</button>
       <small>Never enter your UPI PIN here. We only need the transaction/reference ID.</small>
+    </div>
+  </div>
+
+
+  <!-- ================= ALREADY PURCHASED ================= -->
+  <div id="alreadyPurchasedModal" class="modal hidden">
+    <div class="modal-card">
+      <button class="close" onclick="closeAlreadyPurchased()" aria-label="Close">×</button>
+      <h2>🔐 Already Purchased?</h2>
+      <p>Enter the same email and mobile number you used while paying. Access opens only after the payment is approved.</p>
+      <input id="restoreEmail" type="email" placeholder="Payment email" autocomplete="email">
+      <input id="restorePhone" type="tel" placeholder="Payment mobile number" autocomplete="tel" maxlength="15">
+      <button id="restoreAccessButton" class="primary" onclick="restorePurchasedAccess()">🔓 Open My Batch</button>
+      <small>Razorpay, Cashfree and admin-approved UPI QR purchases are checked on the server.</small>
     </div>
   </div>
 

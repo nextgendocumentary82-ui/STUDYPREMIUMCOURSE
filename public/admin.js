@@ -3,7 +3,7 @@ async function approveQrOrder(orderId) {
   try {
     await api(`/api/admin/orders/${encodeURIComponent(orderId)}/upi-qr/approve`, { method: "POST" });
     alert("QR payment verified and access unlocked.");
-    await loadData();
+    await refreshAdmin();
   } catch (error) {
     alert(error.message || "Could not approve QR payment.");
   }
@@ -14,7 +14,7 @@ async function rejectQrOrder(orderId) {
   try {
     await api(`/api/admin/orders/${encodeURIComponent(orderId)}/upi-qr/reject`, { method: "POST" });
     alert("QR payment rejected.");
-    await loadData();
+    await refreshAdmin();
   } catch (error) {
     alert(error.message || "Could not reject QR payment.");
   }
@@ -358,9 +358,7 @@ async function refreshAdmin() {
       apps,
       stats,
       orders,
-      donations,
-      batchAccess,
-      donationQrPayments
+      donations
     ] = await Promise.all([
 
       api("/api/admin/apps"),
@@ -369,11 +367,7 @@ async function refreshAdmin() {
 
       api("/api/admin/orders"),
 
-      api("/api/admin/donations"),
-
-      api("/api/admin/batch-access"),
-
-      api("/api/admin/donation-payments")
+      api("/api/admin/donations")
 
     ]);
 
@@ -398,8 +392,6 @@ async function refreshAdmin() {
 
     renderCustomers(adminOrders);
     renderDonations(Array.isArray(donations) ? donations : []);
-    renderBatchAccess(Array.isArray(batchAccess) ? batchAccess : []);
-    renderDonationQrPayments(Array.isArray(donationQrPayments) ? donationQrPayments : []);
     await loadWebsiteSettings();
 
 
@@ -659,7 +651,6 @@ async function saveApp() {
       appFileMime,
       appFileSize,
       validity: val("fValidity").trim() || "Lifetime",
-      validityOptions: val("fValidityOptions").split(",").map(x => x.trim()).filter(Boolean),
       rating: Number(val("fRating") || 4.8),
       description: val("fDescription").trim(),
       screenshots,
@@ -779,7 +770,6 @@ function editApp(id) {
     "fValidity",
     app.validity
   );
-  setv("fValidityOptions", (app.validityOptions || ["2 Months", "3 Months", "1 Year", "Lifetime"]).join(", "));
 
   setv(
     "fRating",
@@ -966,27 +956,6 @@ function renderDonations(rows){
   if(!rows.length){el.innerHTML='<p class="loading">No pending donation requests.</p>';return;}
   el.innerHTML=rows.map(x=>`<div class="order"><b>${esc(x.appId?.name||"Batch")}</b><br><span>${esc(x.donorEmail)} → ${esc(x.recipientEmail)}</span><br><small>Status: ${esc(x.status)} • ${new Date(x.createdAt).toLocaleString("en-IN")}</small><div style="display:flex;gap:8px;margin-top:10px"><button class="primary" onclick="approveDonation('${x._id}')">Approve & Transfer</button><button class="secondary" onclick="rejectDonation('${x._id}')">Reject</button></div></div>`).join("");
 }
-
-
-function renderBatchAccess(rows) {
-  const el=document.getElementById("batchAccess"); if(!el) return;
-  if(!rows.length){el.innerHTML='<p class="loading">No purchased courses yet.</p>';return;}
-  el.innerHTML=rows.map(x=>{
-    const o=x.orderId||{}; const b=x.appId||{};
-    const exp=x.expiresAt ? new Date(x.expiresAt).toLocaleString("en-IN") : "Lifetime";
-    const options=["2 Months","3 Months","1 Year","Lifetime"];
-    return `<div class="order"><b>📚 ${esc(b.name||"Course")}</b><br><span>👤 ${esc(o.customerName||"—")} • 📧 ${esc(o.customerEmail||x.ownerEmail||"—")} • 📱 ${esc(o.customerPhone||"—")}</span><br><span>Validity: <b>${esc(x.purchaseDuration||"Lifetime")}</b> • Expiry: ${esc(exp)} • Status: ${x.active && !x.expired ? "ACTIVE" : "EXPIRED/REMOVED"}</span><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${options.map(d=>`<button class="secondary" onclick="changeBatchDuration('${x._id}','${d}')">${d}</button>`).join("")}<button class="primary" onclick="removeBatchAccess('${x._id}')">🗑 Remove Access</button></div></div>`;
-  }).join("");
-}
-async function changeBatchDuration(id,duration){try{await api(`/api/admin/batch-access/${encodeURIComponent(id)}/duration`,{method:"POST",body:JSON.stringify({duration})});alert("Course duration updated.");await refreshAdmin();}catch(e){alert(e.message||"Could not change duration.")}}
-async function removeBatchAccess(id){if(!confirm("Remove this student's course access? They will need to pay again."))return;try{await api(`/api/admin/batch-access/${encodeURIComponent(id)}/remove`,{method:"POST"});alert("Course access removed. Student must pay again.");await refreshAdmin();}catch(e){alert(e.message||"Could not remove access.")}}
-function renderDonationQrPayments(rows){
-  const el=document.getElementById("donationQrPayments");if(!el)return;
-  if(!rows.length){el.innerHTML='<p class="loading">No pending donation QR payments.</p>';return;}
-  el.innerHTML=rows.map(x=>`<div class="order"><b>❤️ ${esc(x.donorName)}</b><br><span>📧 ${esc(x.donorEmail)} • 💰 ${money(x.amount)}</span><br><span>UTR: <b>${esc(x.upiReference||"Not submitted")}</b></span><br><small>${x.createdAt?new Date(x.createdAt).toLocaleString("en-IN"):"—"}</small><div style="display:flex;gap:8px;margin-top:10px"><button class="primary" onclick="approveDonationQr('${x._id}')">✓ Verify & Approve</button><button class="secondary" onclick="rejectDonationQr('${x._id}')">Reject</button></div></div>`).join("");
-}
-async function approveDonationQr(id){if(!confirm("Have you verified the exact donation amount and UTR in your UPI/bank account?"))return;try{await api(`/api/admin/donation-payments/${encodeURIComponent(id)}/approve`,{method:"POST"});alert("Donation approved.");await refreshAdmin();}catch(e){alert(e.message||"Could not approve donation.")}}
-async function rejectDonationQr(id){if(!confirm("Reject this donation QR payment?"))return;try{await api(`/api/admin/donation-payments/${encodeURIComponent(id)}/reject`,{method:"POST"});alert("Donation rejected.");await refreshAdmin();}catch(e){alert(e.message||"Could not reject donation.")}}
 
 async function loadWebsiteSettings() {
   const settings = await api("/api/admin/settings");

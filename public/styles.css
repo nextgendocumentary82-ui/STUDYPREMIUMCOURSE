@@ -96,3 +96,6 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Purchased access restore */
+.action-stack .secondary { min-height: 48px; }

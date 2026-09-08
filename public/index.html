@@ -145,7 +145,6 @@
         <div class="donate-form-actions">
           <button class="primary" onclick="startDonationPayment()">💳 Donate with Razorpay</button>
           <button class="primary" onclick="startCashfreeDonationPayment()">💚 Donate with Cashfree</button>
-          <button class="secondary" onclick="startDonationQrPayment()">📲 Donate via UPI QR</button>
         </div>
       </div>
 
@@ -156,19 +155,6 @@
       </div>
     </div>
   </section>
-
-
-  <div id="donationQrModal" class="modal hidden">
-    <div class="modal-card qr-payment-card">
-      <button class="close" onclick="closeDonationQrPayment()" aria-label="Close">×</button>
-      <h2>📲 Donate via UPI QR</h2>
-      <p id="donationQrText">Scan the QR and pay the exact donation amount.</p>
-      <div class="qr-image-wrap"><img id="donationQrImage" src="/qr-payment.jpeg" alt="Donation UPI QR code"></div>
-      <input id="donationQrReference" type="text" placeholder="Enter UPI transaction/reference ID" autocomplete="off" maxlength="64">
-      <button id="donationQrSubmit" class="primary" onclick="submitDonationQrPayment()">I Have Paid — Submit UTR</button>
-      <small>Admin bank/UPI verification is required before this donation appears on the leaderboard.</small>
-    </div>
-  </div>
 
   <!-- ================= BOTTOM NAV ================= -->
 

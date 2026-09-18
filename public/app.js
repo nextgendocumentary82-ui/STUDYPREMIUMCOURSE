@@ -3,9 +3,7 @@
    Frontend: Vercel
    Backend: Cloudflare Worker
 ========================================================= */
-
-const API_BASE =
-  "https://studypremiumcourse.omprakashverma4344.workers.dev";
+const API_BASE = window.location.origin;
 
 (function setupAPI() {
   const originalFetch = window.fetch.bind(window);

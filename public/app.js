@@ -1,3 +1,46 @@
+/* =========================================================
+   STUDY PREMIUM COURSE — API CONFIG
+   Frontend: Vercel
+   Backend: Cloudflare Worker
+========================================================= */
+
+const API_BASE =
+  "https://studypremiumcourse.omprakashverma4344.workers.dev";
+
+(function setupAPI() {
+  const originalFetch = window.fetch.bind(window);
+
+  window.fetch = function (input, init) {
+    try {
+      if (typeof input === "string" && input.startsWith("/api/")) {
+        input = API_BASE + input;
+      } else if (input instanceof URL && input.pathname.startsWith("/api/")) {
+        input = new URL(API_BASE + input.pathname + input.search);
+      } else if (input instanceof Request) {
+        const u = new URL(input.url);
+        if (u.origin === window.location.origin && u.pathname.startsWith("/api/")) {
+          input = new Request(API_BASE + u.pathname + u.search, input);
+        }
+      }
+    } catch (error) {
+      console.error("API URL conversion error:", error);
+    }
+    return originalFetch(input, init);
+  };
+})();
+
+function apiMediaUrl(url) {
+  if (!url) return "";
+  if (typeof url === "string" && url.startsWith("/api/")) {
+    return API_BASE + url;
+  }
+  return url;
+}
+
+/* =========================================================
+   ORIGINAL APP.JS
+========================================================= */
+
 
 /* =========================================================
    LIVE USER + VISITOR COUNTER
@@ -20,7 +63,7 @@
       });
       const data = await r.json();
       if (r.ok) renderLiveCounter(data);
-    } catch {}
+    } catch { }
   }
 
   function renderLiveCounter(data) {
@@ -162,7 +205,7 @@ async function loadApps() {
 
           <img
             class="app-logo"
-            src="${esc(app.logo || "")}"
+            src="${esc(apiMediaUrl(app.logo || ""))}"
             alt="${esc(app.name)}"
             loading="lazy"
             onerror="this.style.opacity='.25'"
@@ -387,7 +430,7 @@ function renderDetail(app) {
       ? `
         <img
           class="banner"
-          src="${esc(app.banner)}"
+          src="${esc(apiMediaUrl(app.banner))}"
           alt="${esc(app.name)}"
           loading="lazy"
         >
@@ -398,7 +441,7 @@ function renderDetail(app) {
     screenshots.length
       ? screenshots.map(image => `
           <img
-            src="${esc(image)}"
+            src="${esc(apiMediaUrl(image))}"
             alt="Screenshot"
             loading="lazy"
           >
@@ -417,7 +460,7 @@ function renderDetail(app) {
 
       <img
         class="detail-logo"
-        src="${esc(app.logo || "")}"
+        src="${esc(apiMediaUrl(app.logo || ""))}"
         alt="${esc(app.name)}"
         onerror="this.style.opacity='.25'"
       >
@@ -695,8 +738,8 @@ function handleAccess(type) {
    CLOSE PAYMENT
 ========================================================= */
 
-function getSelectedPurchasePlan(){
-  return {planId:"lifetime",durationDays:0,label:"Lifetime",price:Number(currentApp?.price||0)};
+function getSelectedPurchasePlan() {
+  return { planId: "lifetime", durationDays: 0, label: "Lifetime", price: Number(currentApp?.price || 0) };
 }
 
 
@@ -1287,7 +1330,7 @@ function openDestination(type, item = currentApp) {
   // Free B2-hosted APKs use a separate public download endpoint.
   if (type === "app" && item.appFileKey) {
     window.location.href =
-      `/api/free-download/${encodeURIComponent(item._id)}`;
+      `${API_BASE}/api/free-download/${encodeURIComponent(item._id)}`;
     return;
   }
 
@@ -1455,7 +1498,7 @@ function renderAppRow(app) {
   return `
     <article class="app-row">
       <button class="favorite-btn" title="Favorite" onclick="event.stopPropagation();toggleFavorite('${esc(app._id)}', this)">${isFavorite(app._id) ? "★" : "☆"}</button>
-      <img class="app-logo" src="${esc(app.logo || "")}" alt="${esc(app.name)}" onerror="this.style.display='none'">
+      <img class="app-logo" src="${esc(apiMediaUrl(app.logo || ""))}" alt="${esc(app.name)}" onerror="this.style.display='none'">
       <div class="app-info">
         <h3>${esc(app.name)}</h3>
         <p>${esc(app.developer || "STUDY PREMIUM COURSE")} • ${esc(app.category || "Education")}</p>
@@ -1475,7 +1518,7 @@ async function loadDonationLeaderboard() {
     if (!rows.length) { el.innerHTML = `<div class="loading">No donations yet. Be the first supporter!</div>`; return; }
     el.innerHTML = rows.map(x => `
       <div class="leader-row ${x.rank <= 3 ? "leader-top" : ""}">
-        <div class="leader-rank">${x.rank <= 3 ? ["🥇","🥈","🥉"][x.rank-1] : "#" + x.rank}</div>
+        <div class="leader-rank">${x.rank <= 3 ? ["🥇", "🥈", "🥉"][x.rank - 1] : "#" + x.rank}</div>
         <div class="leader-name">${esc(x.name)}</div>
         <strong>₹${Number(x.amount || 0).toLocaleString("en-IN")}</strong>
       </div>`).join("");

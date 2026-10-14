@@ -1,0 +1,62 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "JWT_SECRET",
+      "description": "Long random string used to sign auth tokens. Required at boot — app exits without it.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "MONGODB_URI",
+      "description": "MongoDB connection string. Overridden in the sandbox to point at the local compose mongo service; set your Atlas URI for production.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "ADMIN_USERNAME",
+      "description": "Username for the auto-created admin account.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "ADMIN_PASSWORD",
+      "description": "Password for the auto-created admin account.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "ADMIN_SECRET_KEY",
+      "description": "Separate secret key required at admin login.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "RAZORPAY_KEY_ID",
+      "description": "Razorpay API key ID. Needed for payment checkout endpoints.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "RAZORPAY_KEY_SECRET",
+      "description": "Razorpay API key secret. Needed for payment checkout endpoints.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "RAZORPAY_WEBHOOK_SECRET",
+      "description": "Razorpay webhook signing secret. Needed only for the webhook endpoint.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "B2_KEY_ID",
+      "description": "Backblaze B2 application key ID. Optional — B2 is used lazily for uploads.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "B2_APPLICATION_KEY",
+      "description": "Backblaze B2 application key. Optional — B2 is used lazily for uploads.",
+      "requiredAtBoot": false
+    },
+    {
+      "name": "B2_BUCKET_NAME",
+      "description": "Backblaze B2 bucket name. Optional — B2 is used lazily for uploads.",
+      "requiredAtBoot": false
+    }
+  ]
+}

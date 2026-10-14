@@ -1,0 +1,24 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/api/health",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    { "name": "JWT_SECRET", "description": "Long random JWT signing secret (32+ chars). Required at boot.", "requiredAtBoot": true, "generatedForDevelopment": true },
+    { "name": "ADMIN_PASSWORD", "description": "Admin login password. Required for the admin panel.", "requiredAtBoot": true, "generatedForDevelopment": true },
+    { "name": "ADMIN_SECRET_KEY", "description": "Admin login secret key. Required for the admin panel.", "requiredAtBoot": true, "generatedForDevelopment": true },
+    { "name": "RAZORPAY_KEY_ID", "description": "Razorpay key ID from the Razorpay dashboard (test or live).", "requiredAtBoot": false },
+    { "name": "RAZORPAY_KEY_SECRET", "description": "Razorpay key secret from the Razorpay dashboard.", "requiredAtBoot": false },
+    { "name": "RAZORPAY_WEBHOOK_SECRET", "description": "Razorpay webhook secret from the Razorpay dashboard.", "requiredAtBoot": false },
+    { "name": "CASHFREE_APP_ID", "description": "Cashfree app ID from the Cashfree dashboard.", "requiredAtBoot": false },
+    { "name": "CASHFREE_SECRET_KEY", "description": "Cashfree secret key from the Cashfree dashboard.", "requiredAtBoot": false },
+    { "name": "B2_KEY_ID", "description": "Backblaze B2 application key ID for file uploads.", "requiredAtBoot": false },
+    { "name": "B2_APPLICATION_KEY", "description": "Backblaze B2 application key for file uploads.", "requiredAtBoot": false },
+    { "name": "B2_BUCKET_NAME", "description": "Backblaze B2 bucket name for file uploads.", "requiredAtBoot": false },
+    { "name": "B2_BUCKET_ID", "description": "Backblaze B2 bucket ID (recommended for restricted keys).", "requiredAtBoot": false },
+    { "name": "SMTP_HOST", "description": "SMTP server host for donation emails.", "requiredAtBoot": false },
+    { "name": "SMTP_PORT", "description": "SMTP server port (e.g. 587).", "requiredAtBoot": false },
+    { "name": "SMTP_USER", "description": "SMTP username.", "requiredAtBoot": false },
+    { "name": "SMTP_PASS", "description": "SMTP password.", "requiredAtBoot": false },
+    { "name": "SMTP_FROM", "description": "From address for donation emails.", "requiredAtBoot": false }
+  ]
+}

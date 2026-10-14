@@ -1,0 +1,44 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: on-failure
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  web:
+    image: node:22-slim
+    restart: on-failure
+    working_dir: /app
+    volumes:
+      - .:/app
+      - node-modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./.env.base44-defaults
+      - /run/base44/app.env
+    environment:
+      - PORT=3000
+      - MONGODB_URI=mongodb://mongo:27017/study-premium-course
+      - ADMIN_USERNAME=admin
+      - BASE44_PREVIEW_MODE
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: ["sh", "-ec", "npm install --omit=dev && exec node server.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  mongo-data:
+  node-modules:

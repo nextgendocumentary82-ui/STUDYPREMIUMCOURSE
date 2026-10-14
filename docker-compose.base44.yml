@@ -25,8 +25,6 @@ services:
       - /run/base44/app.env
     environment:
       - PORT=3000
-      - MONGODB_URI=mongodb://mongo:27017/study-premium-course
-      - ADMIN_USERNAME=admin
       - BASE44_PREVIEW_MODE
     depends_on:
       mongo:

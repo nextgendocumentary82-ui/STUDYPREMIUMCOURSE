@@ -3,7 +3,9 @@
   "healthPath": "/api/health",
   "startCommand": "docker compose -f docker-compose.base44.yml up -d",
   "secrets": [
+    { "name": "MONGODB_URI", "description": "MongoDB connection string (e.g. MongoDB Atlas). Falls back to the compose mongo service when unset.", "requiredAtBoot": true },
     { "name": "JWT_SECRET", "description": "Long random JWT signing secret (32+ chars). Required at boot.", "requiredAtBoot": true, "generatedForDevelopment": true },
+    { "name": "ADMIN_USERNAME", "description": "Admin login username.", "requiredAtBoot": true },
     { "name": "ADMIN_PASSWORD", "description": "Admin login password. Required for the admin panel.", "requiredAtBoot": true, "generatedForDevelopment": true },
     { "name": "ADMIN_SECRET_KEY", "description": "Admin login secret key. Required for the admin panel.", "requiredAtBoot": true, "generatedForDevelopment": true },
     { "name": "RAZORPAY_KEY_ID", "description": "Razorpay key ID from the Razorpay dashboard (test or live).", "requiredAtBoot": false },
@@ -15,6 +17,7 @@
     { "name": "B2_APPLICATION_KEY", "description": "Backblaze B2 application key for file uploads.", "requiredAtBoot": false },
     { "name": "B2_BUCKET_NAME", "description": "Backblaze B2 bucket name for file uploads.", "requiredAtBoot": false },
     { "name": "B2_BUCKET_ID", "description": "Backblaze B2 bucket ID (recommended for restricted keys).", "requiredAtBoot": false },
+    { "name": "PUBLIC_URL", "description": "Public base URL of the deployed app (used for payment return links).", "requiredAtBoot": false },
     { "name": "SMTP_HOST", "description": "SMTP server host for donation emails.", "requiredAtBoot": false },
     { "name": "SMTP_PORT", "description": "SMTP server port (e.g. 587).", "requiredAtBoot": false },
     { "name": "SMTP_USER", "description": "SMTP username.", "requiredAtBoot": false },

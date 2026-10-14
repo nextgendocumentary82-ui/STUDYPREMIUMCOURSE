@@ -13,9 +13,11 @@ docker compose -f docker-compose.base44.yml up -d --build
 The app listens on host port 3000. There is no hot reload — after editing source, restart the `web` service (or call reload_preview).
 
 ## Required env (boot)
-- `MONGODB_URI` — provided by the compose `mongo` service (local).
-- `JWT_SECRET` — app exits without it. A dev placeholder is generated into `/run/base44/app.env`.
-- `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_SECRET_KEY` — admin login. Dev placeholders generated; replace with real values for the admin panel.
+- `MONGODB_URI` — supplied via app secrets (MongoDB Atlas). Falls back to the local compose `mongo` service via `.env.base44-defaults` only when unset.
+- `JWT_SECRET` — app exits without it. Delivered via app secrets.
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_SECRET_KEY` — admin login. Supplied via app secrets (fallback `admin` + dev placeholders in `.env.base44-defaults`).
+
+Never put these keys under Compose `environment:` — that would permanently override the dashboard values. They are injected via `env_file` (`/run/base44/app.env` last, so it wins).
 
 ## Optional external integrations (do not block boot)
 - Razorpay (`RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET`) — paid checkout & signature verification.

@@ -363,6 +363,8 @@ const upload = multer({
 
 let b2AuthCache = null;
 let b2BucketCache = null;
+const b2DownloadCooldowns = new Map();
+const B2_DOWNLOAD_CAP_COOLDOWN_MS = 5 * 60 * 1000;
 
 function envValue(name) {
   const value = String(process.env[name] || "").trim();
@@ -909,6 +911,23 @@ async function b2DownloadStream(
     );
   }
 
+  const cooldownUntil =
+    b2DownloadCooldowns.get(safeName) || 0;
+
+  if (cooldownUntil > Date.now()) {
+    const error = new Error(
+      "Backblaze media is temporarily unavailable."
+    );
+
+    error.status = 503;
+    error.b2Code = "download_cap_exceeded";
+    error.retryAfterSeconds = Math.ceil(
+      (cooldownUntil - Date.now()) / 1000
+    );
+
+    throw error;
+  }
+
   const encodedPath =
     safeName
       .split("/")
@@ -965,9 +984,24 @@ async function b2DownloadStream(
         .text()
         .catch(() => "");
 
-    throw new Error(
+    const error = new Error(
       `Backblaze file could not be downloaded (${response.status}). ${text}`
     );
+
+    error.status = response.status;
+
+    try {
+      error.b2Code = JSON.parse(text).code || "";
+    } catch {}
+
+    if (error.b2Code === "download_cap_exceeded") {
+      b2DownloadCooldowns.set(
+        safeName,
+        Date.now() + B2_DOWNLOAD_CAP_COOLDOWN_MS
+      );
+    }
+
+    throw error;
   }
 
   const type =
@@ -3458,6 +3492,22 @@ app.get(
         res
       );
     } catch (error) {
+      if (error.b2Code === "download_cap_exceeded") {
+        if (!res.headersSent) {
+          res.setHeader(
+            "Retry-After",
+            String(error.retryAfterSeconds || 300)
+          );
+
+          return res.status(503).json({
+            error:
+              "Media is temporarily unavailable. Please try again later."
+          });
+        }
+
+        return;
+      }
+
       console.error(
         "MEDIA ERROR:",
         error.message

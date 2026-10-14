@@ -27,5 +27,7 @@ Never put these keys under Compose `environment:` — that would permanently ove
 
 Provide any of these via the Base44 secrets dashboard; they land in `/run/base44/app.env`.
 
+If Backblaze responds with `download_cap_exceeded`, media requests return a retryable 503 and the affected file is paused for five minutes. This limits repeated external requests until the Backblaze cap is raised or resets.
+
 ## Admin
 Open `/admin.html` and log in with the admin username/password/secret key.
